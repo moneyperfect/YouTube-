@@ -15,6 +15,8 @@ from ytsubviewer.models import (
     TranslationGlossaryEntry,
     TranslationStylePreset,
 )
+from ytsubviewer.providers import ModelProvider, get_default_provider, get_provider
+from ytsubviewer.services.base import BaseService
 from ytsubviewer.utils import extract_json_payload, normalize_chinese_text, normalize_english_text
 
 
@@ -80,7 +82,7 @@ DEFAULT_ALLOWED_ENGLISH_TERMS = {
 }
 
 
-class DeepSeekTranslator:
+class DeepSeekTranslator(BaseService):
     STYLE_PRESETS: ClassVar[dict[str, TranslationStylePreset]] = {
         "default": TranslationStylePreset(
             name="default",
@@ -128,9 +130,10 @@ class DeepSeekTranslator:
         ),
     }
 
-    def __init__(self, settings: Settings, controls: TranslationControlConfig | None = None) -> None:
-        self.settings = settings
+    def __init__(self, settings: Settings, controls: TranslationControlConfig | None = None, provider: ModelProvider | None = None) -> None:
+        super().__init__(settings)
         self.controls = controls or settings.translation_controls()
+        self.provider = provider or get_provider(settings.provider_name) or get_default_provider()
         self._local = threading.local()
         self.style_preset = self.get_style_preset(self.controls.style_preset)
         self._protected_terms = self._normalize_terms(
@@ -212,8 +215,8 @@ class DeepSeekTranslator:
         self,
         cues: list[SubtitleCue],
     ) -> Generator[tuple[int, int, list[SubtitleCue]], None, None]:
-        if not self.settings.deepseek_api_key:
-            raise RuntimeError("未配置 DEEPSEEK_API_KEY，无法翻译字幕。")
+        if not self.provider.has_key():
+            raise RuntimeError(f"未配置 {self.provider.label} 的 API Key，无法翻译字幕。")
 
         batches = self.build_batches(cues)
         total_batches = len(batches)
@@ -347,8 +350,9 @@ class DeepSeekTranslator:
     def _request_rows(self, batch: list[SubtitleCue], *, repair: bool) -> list[dict]:
         client = self._get_client()
         payload = [self._build_payload_row(cue, repair=repair) for cue in batch]
+        model = self.settings.model_name or self.provider.models[0] if self.provider.models else "deepseek-chat"
         response = client.chat.completions.create(
-            model=self.settings.deepseek_model,
+            model=model,
             temperature=self.style_preset.temperature if not repair else min(self.style_preset.temperature, 0.15),
             messages=[
                 {"role": "system", "content": self.build_system_prompt(repair=repair)},
@@ -372,11 +376,17 @@ class DeepSeekTranslator:
             from openai import OpenAI
         except ImportError as exc:
             raise RuntimeError(
-                "缺少 DeepSeek 调用依赖，请先执行 `pip install -r requirements.txt` 安装 openai。"
+                "缺少翻译调用依赖，请先执行 `pip install -r requirements.txt` 安装 openai。"
             ) from exc
+
+        api_key = self.provider.resolve_api_key()
+        base_url = self.provider.base_url
+        if not api_key and self.provider.name != "ollama":
+            raise RuntimeError(f"未配置 {self.provider.label} 的 API Key。")
+
         client = OpenAI(
-            api_key=self.settings.deepseek_api_key,
-            base_url=self.settings.deepseek_base_url,
+            api_key=api_key or "ollama",
+            base_url=base_url,
             timeout=120,
             max_retries=2,
         )

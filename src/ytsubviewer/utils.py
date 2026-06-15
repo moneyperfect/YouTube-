@@ -13,6 +13,8 @@ T = TypeVar("T")
 def slugify_filename(value: str) -> str:
     cleaned = re.sub(r"[<>:\"/\\|?*]", " ", value).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
+    # Remove trailing dots (Windows compatibility)
+    cleaned = cleaned.rstrip(".")
     return cleaned[:120] or "video"
 
 

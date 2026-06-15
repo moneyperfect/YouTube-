@@ -8,15 +8,16 @@ from pathlib import Path
 from ytsubviewer.config import Settings
 from ytsubviewer.models import SubtitleCue
 from ytsubviewer.runtime import configure_windows_dll_search_path
+from ytsubviewer.services.base import BaseService
 from ytsubviewer.utils import normalize_english_text, program_exists
 
 
 logger = logging.getLogger(__name__)
 
 
-class TranscriptionService:
+class TranscriptionService(BaseService):
     def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+        super().__init__(settings)
 
     def extract_audio(self, video_path: Path, work_dir: Path) -> Path:
         if not program_exists(self.settings.ffmpeg_command):
@@ -151,7 +152,10 @@ class TranscriptionService:
                         "缺少本地转写依赖，请先执行 `pip install -r requirements.txt` 安装 faster-whisper。"
                     ) from exc
 
-                model = WhisperModel(model_name, device=device, compute_type=compute_type)
+                # 优先使用本地内置模型目录
+                local_model_dir = self.settings.project_root / "models" / model_name
+                resolved_model = str(local_model_dir) if local_model_dir.exists() else model_name
+                model = WhisperModel(resolved_model, device=device, compute_type=compute_type)
                 with audio_path.open("rb") as audio_file:
                     segments, _ = model.transcribe(
                         audio_file,

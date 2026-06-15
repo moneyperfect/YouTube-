@@ -67,6 +67,12 @@ def split_source_cues(cues: list[SubtitleCue], max_chars: int = 90) -> list[Subt
     refined: list[SubtitleCue] = []
     cue_id = 1
     for cue in cues:
+        # Don't split cues shorter than minimum duration
+        if cue.end - cue.start < MIN_SUBTITLE_DURATION:
+            refined.append(cue.clone(id=cue_id, source_text=cue.source_text))
+            cue_id += 1
+            continue
+
         pieces = split_english_text(cue.source_text, max_chars=max_chars)
         if len(pieces) == 1:
             refined.append(cue.clone(id=cue_id, source_text=pieces[0]))
@@ -77,16 +83,34 @@ def split_source_cues(cues: list[SubtitleCue], max_chars: int = 90) -> list[Subt
         durations = _piece_durations(cue.start, cue.end, pieces)
         for index, piece in enumerate(pieces):
             end = cue.end if index == len(pieces) - 1 else cursor + durations[index]
+            # Enforce minimum duration
+            if end - cursor < MIN_SUBTITLE_DURATION:
+                end = min(cursor + MIN_SUBTITLE_DURATION, cue.end)
             refined.append(cue.clone(id=cue_id, start=cursor, end=end, source_text=piece))
             cue_id += 1
             cursor = end
     return refined
 
 
+MIN_SUBTITLE_DURATION = 2.0  # seconds
+
+
 def polish_translated_cues(cues: list[SubtitleCue], width: int = 20, max_lines: int = 2) -> list[SubtitleCue]:
     polished: list[SubtitleCue] = []
     cue_id = 1
     for cue in cues:
+        # Don't split cues shorter than minimum duration
+        if cue.end - cue.start < MIN_SUBTITLE_DURATION:
+            polished.append(SubtitleCue(
+                id=cue_id,
+                start=cue.start,
+                end=cue.end,
+                source_text=cue.source_text,
+                target_text=wrap_cjk_text(cue.target_text, width=width, max_lines=max_lines),
+            ))
+            cue_id += 1
+            continue
+
         pieces = split_chinese_text(cue.target_text, max_chars=width * max_lines)
         if not pieces:
             continue
@@ -95,6 +119,9 @@ def polish_translated_cues(cues: list[SubtitleCue], width: int = 20, max_lines: 
         durations = _piece_durations(cue.start, cue.end, pieces)
         for index, piece in enumerate(pieces):
             end = cue.end if index == len(pieces) - 1 else cursor + durations[index]
+            # Enforce minimum duration
+            if end - cursor < MIN_SUBTITLE_DURATION:
+                end = min(cursor + MIN_SUBTITLE_DURATION, cue.end)
             polished.append(
                 SubtitleCue(
                     id=cue_id,

@@ -1,10 +1,9 @@
+"""Settings dataclass and configuration loading."""
+
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import os
-import platform
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,8 +11,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from ytsubviewer.config.crypto import decrypt_value, encrypt_value
 from ytsubviewer.models import TranslationControlConfig, TranslationGlossaryEntry
-
 
 load_dotenv(override=False)
 
@@ -22,6 +21,9 @@ APP_NAME = "YTSubViewer"
 APP_VERSION = "1.0.0"
 USER_SETTINGS_FILENAME = "settings.json"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+# ── Path resolution utilities ──
 
 
 def _resolve_local_appdata_dir() -> Path:
@@ -58,10 +60,8 @@ def _resolve_config_dir() -> Path:
 
 
 def _resolve_default_data_root() -> Path:
-    if os.name == "nt":
-        preferred = Path("D:/") / f"{APP_NAME}Data"
-        if preferred.drive and preferred.drive.upper() == "D:" and Path("D:/").exists():
-            return preferred
+    if _ensure_writable_directory(PROJECT_ROOT):
+        return PROJECT_ROOT
     return _resolve_config_dir()
 
 
@@ -96,30 +96,45 @@ def _resolve_data_root(value: str | os.PathLike[str] | None, *, fallback: Path) 
     return fallback
 
 
-def _derive_encryption_key() -> bytes:
-    machine_id = f"{platform.node()}-{platform.machine()}-{platform.processor()}"
-    digest = hashlib.sha256(machine_id.encode()).digest()
-    return base64.urlsafe_b64encode(digest)
+def _first_existing_path(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
 
 
-def encrypt_value(plaintext: str) -> str:
-    try:
-        from cryptography.fernet import Fernet
-    except ImportError:
-        return plaintext
-    key = _derive_encryption_key()
-    f = Fernet(key)
-    return f.encrypt(plaintext.encode()).decode()
+def _resolve_tool_command(explicit: str | None, *, executable_name: str, search_roots: list[Path]) -> str:
+    if explicit:
+        return explicit
+    import shutil as _shutil
+
+    base_name = Path(executable_name).stem
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        portable_bin = root / ".tools" / base_name / "bin" / executable_name
+        if portable_bin.exists():
+            return str(portable_bin)
+        portable_bin_no_ext = root / ".tools" / base_name / "bin" / f"{base_name}.exe"
+        if portable_bin_no_ext.exists():
+            return str(portable_bin_no_ext)
+
+    candidates: list[Path] = []
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for tool_dir in [".tools", "tools"]:
+            for pattern in [executable_name, base_name, f"{base_name}*"]:
+                candidates.extend(sorted(root.glob(f"{tool_dir}/**/{pattern}")))
+    found = _shutil.which(base_name)
+    if found:
+        return found
+    found_path = _first_existing_path(candidates)
+    return str(found_path) if found_path else executable_name
 
 
-def decrypt_value(ciphertext: str) -> str:
-    try:
-        from cryptography.fernet import Fernet
-    except ImportError:
-        return ciphertext
-    key = _derive_encryption_key()
-    f = Fernet(key)
-    return f.decrypt(ciphertext.encode()).decode()
+# ── User settings persistence ──
 
 
 def _load_user_settings(path: Path | None = None) -> dict[str, Any]:
@@ -137,6 +152,10 @@ def save_user_settings(
     *,
     deepseek_api_key: str | None = None,
     data_root: str | None = None,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+    base_url: str | None = None,
+    provider_api_keys: dict[str, str] | None = None,
     path: Path | None = None,
 ) -> Path:
     config_path = path or (_resolve_config_dir() / USER_SETTINGS_FILENAME)
@@ -148,34 +167,25 @@ def save_user_settings(
         payload.pop("deepseek_api_key", None)
     if data_root is not None:
         payload["data_root"] = data_root.strip()
+    if provider_name is not None:
+        payload["provider_name"] = provider_name.strip()
+    if model_name is not None:
+        payload["model_name"] = model_name.strip()
+    if base_url is not None:
+        payload["custom_base_url"] = base_url.strip()
+    if provider_api_keys is not None:
+        encrypted_keys = {}
+        for key_name, key_value in provider_api_keys.items():
+            if key_value.strip():
+                encrypted_keys[f"api_key_{key_name}"] = encrypt_value(key_value.strip())
+            else:
+                encrypted_keys[f"api_key_{key_name}"] = ""
+        payload.update(encrypted_keys)
     config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return config_path
 
 
-def _first_existing_path(paths: list[Path]) -> Path | None:
-    for path in paths:
-        if path.exists():
-            return path
-    return None
-
-
-def _resolve_tool_command(explicit: str | None, *, executable_name: str, search_roots: list[Path]) -> str:
-    if explicit:
-        return explicit
-    import shutil as _shutil
-    base_name = Path(executable_name).stem
-    candidates: list[Path] = []
-    for root in search_roots:
-        if not root.exists():
-            continue
-        for tool_dir in [".tools", "tools"]:
-            for pattern in [executable_name, base_name, f"{base_name}*"]:
-                candidates.extend(sorted(root.glob(f"{tool_dir}/**/{pattern}")))
-    found = _shutil.which(base_name)
-    if found:
-        return found
-    found_path = _first_existing_path(candidates)
-    return str(found_path) if found_path else executable_name
+# ── Settings dataclass ──
 
 
 @dataclass(frozen=True)
@@ -194,6 +204,8 @@ class Settings:
     logs_dir: Path = field(default_factory=lambda: _resolve_project_root() / "logs")
     hf_home: Path = field(default_factory=lambda: _resolve_project_root() / ".cache" / "huggingface")
     xdg_cache_home: Path = field(default_factory=lambda: _resolve_project_root() / ".cache")
+    provider_name: str = os.getenv("PROVIDER_NAME", "deepseek")
+    model_name: str = os.getenv("MODEL_NAME", "deepseek-chat")
     deepseek_api_key: str | None = os.getenv("DEEPSEEK_API_KEY")
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -212,7 +224,11 @@ class Settings:
     translation_max_chars: int = 2800
     translation_parallel_workers: int = 3
     update_feed_url: str = os.getenv("YTSUBVIEWER_UPDATE_FEED_URL", "")
-    prefer_automatic_subtitles: bool = os.getenv("PREFER_AUTOMATIC_SUBTITLES", "1").strip().lower() not in {"0", "false", "no"}
+    prefer_automatic_subtitles: bool = os.getenv("PREFER_AUTOMATIC_SUBTITLES", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
     target_line_width: int = 20
     max_subtitle_lines: int = 2
     max_concurrent_tasks: int = int(os.getenv("MAX_CONCURRENT_TASKS", "3"))
@@ -271,6 +287,18 @@ class Settings:
             logs_dir=logs_dir,
             hf_home=hf_home,
             xdg_cache_home=xdg_cache_home,
+            provider_name=str(
+                overrides.pop("provider_name", None)
+                or user_settings.get("provider_name")
+                or os.getenv("PROVIDER_NAME", "deepseek")
+            ).strip()
+            or "deepseek",
+            model_name=str(
+                overrides.pop("model_name", None)
+                or user_settings.get("model_name")
+                or os.getenv("MODEL_NAME", "deepseek-chat")
+            ).strip()
+            or "deepseek-chat",
             deepseek_api_key=(
                 overrides.pop("deepseek_api_key", None)
                 or os.getenv("DEEPSEEK_API_KEY")
@@ -291,8 +319,12 @@ class Settings:
                     "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/best[height<=1080]/best",
                 ),
             ),
-            translation_style_preset=overrides.pop("translation_style_preset", os.getenv("TRANSLATION_STYLE_PRESET", "default")),
-            translation_glossary_json=overrides.pop("translation_glossary_json", os.getenv("TRANSLATION_GLOSSARY_JSON", "")),
+            translation_style_preset=overrides.pop(
+                "translation_style_preset", os.getenv("TRANSLATION_STYLE_PRESET", "default")
+            ),
+            translation_glossary_json=overrides.pop(
+                "translation_glossary_json", os.getenv("TRANSLATION_GLOSSARY_JSON", "")
+            ),
             translation_protected_terms_json=overrides.pop(
                 "translation_protected_terms_json",
                 os.getenv("TRANSLATION_PROTECTED_TERMS_JSON", ""),
@@ -302,7 +334,9 @@ class Settings:
             translation_parallel_workers=int(overrides.pop("translation_parallel_workers", 3)),
             update_feed_url=overrides.pop("update_feed_url", os.getenv("YTSUBVIEWER_UPDATE_FEED_URL", "")),
             prefer_automatic_subtitles=(
-                str(overrides.pop("prefer_automatic_subtitles", os.getenv("PREFER_AUTOMATIC_SUBTITLES", "1"))).strip().lower()
+                str(overrides.pop("prefer_automatic_subtitles", os.getenv("PREFER_AUTOMATIC_SUBTITLES", "1")))
+                .strip()
+                .lower()
                 not in {"0", "false", "no"}
             ),
             target_line_width=int(overrides.pop("target_line_width", 20)),

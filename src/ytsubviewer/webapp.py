@@ -1,10 +1,13 @@
+"""FastAPI web application for YTSubViewer."""
+
 from __future__ import annotations
 
+import json
+import logging
 import os
-import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,37 +16,62 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ytsubviewer.auth import AuthMiddleware, generate_session_token
-from ytsubviewer.background_jobs import (
-    BackgroundGenerationManager,
-    GenerationJobSnapshot,
-    TaskSnapshot,
+from ytsubviewer.background_jobs import BackgroundGenerationManager, TaskSnapshot
+from ytsubviewer.config import (
+    APP_VERSION,
+    Settings,
+    decrypt_value,
+    save_user_settings,
+    settings as app_settings,
 )
-from ytsubviewer.config import APP_VERSION, Settings, save_user_settings, settings as app_settings
 from ytsubviewer.creator_profiles import CreatorProfileStore
 from ytsubviewer.i18n import load_translations
 from ytsubviewer.job_state import artifacts_from_state, load_job_state
 from ytsubviewer.license import LicenseManager
-from ytsubviewer.models import JobArtifacts, TranslationControlConfig
+from ytsubviewer.models import TranslationControlConfig
 from ytsubviewer.pipeline import SubtitlePipeline
+from ytsubviewer.providers import ModelProvider, get_provider
 from ytsubviewer.rate_limit import RateLimitMiddleware
+from ytsubviewer.routes.helpers import (
+    build_controls,
+    load_state_for_task,
+    load_state_for_work_dir,
+    resolve_control_texts,
+    resolve_download_path,
+    strategy_text,
+    validate_youtube_url,
+)
+from ytsubviewer.routes.serializers import (
+    serialize_creator_profiles,
+    serialize_current_job,
+    serialize_history,
+    serialize_job,
+    serialize_metadata,
+    serialize_performance_modes,
+    serialize_profile,
+    serialize_providers,
+    serialize_settings,
+    serialize_state,
+    serialize_style_presets,
+    state_from_artifacts,
+)
 from ytsubviewer.runtime import inspect_environment
 from ytsubviewer.services.translate import DeepSeekTranslator
+from ytsubviewer.services.youtube import YouTubeLoginRequired
 from ytsubviewer.update_service import UpdateService
-from ytsubviewer.utils import format_duration, format_eta
+
+logger = logging.getLogger(__name__)
 
 
-YOUTUBE_URL_RE = re.compile(
-    r"^https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)[\w-]+"
-)
-
-
-def _validate_youtube_url(url: str) -> None:
-    if not YOUTUBE_URL_RE.match(url):
-        raise HTTPException(status_code=400, detail=f"无效的 YouTube 链接：{url}")
+# ── Payload models ──
 
 
 class SettingsPayload(BaseModel):
     api_key: str = ""
+    provider_name: str = ""
+    model_name: str = ""
+    base_url: str = ""
+    provider_api_keys: dict[str, str] = {}
 
 
 class AnalyzePayload(BaseModel):
@@ -102,19 +130,34 @@ class LicensePayload(BaseModel):
     license_key: str = ""
 
 
+class TestProviderPayload(BaseModel):
+    provider_name: str
+    api_key: str = ""
+    model_name: str = ""
+    base_url: str = ""
+
+
+# ── App factory ──
+
+
 def create_web_app(
     *,
     app_runtime_settings: Settings | None = None,
     pipeline: SubtitlePipeline | None = None,
     generation_manager: BackgroundGenerationManager | None = None,
-    mount_legacy: bool = True,
 ) -> FastAPI:
     runtime_settings = app_runtime_settings or app_settings
     runtime_pipeline = pipeline or SubtitlePipeline(runtime_settings)
-    runtime_generation_manager = generation_manager or BackgroundGenerationManager(runtime_settings, runtime_pipeline)
+    runtime_generation_manager = generation_manager or BackgroundGenerationManager(
+        runtime_settings, runtime_pipeline
+    )
     runtime_generation_manager.bind_pipeline(runtime_pipeline)
 
     session_token = generate_session_token()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
 
     runtime: dict[str, Any] = {
         "settings": runtime_settings,
@@ -127,7 +170,7 @@ def create_web_app(
     }
 
     web_root = _resolve_web_root(runtime_settings)
-    app = FastAPI(title="YTSubViewer", docs_url=None, redoc_url=None)
+    app = FastAPI(title="YTSubViewer", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.add_middleware(RateLimitMiddleware, max_requests=60, window_seconds=60)
     app.add_middleware(AuthMiddleware, token=session_token)
     app.add_middleware(
@@ -138,12 +181,14 @@ def create_web_app(
     )
     app.mount("/static", StaticFiles(directory=web_root), name="static")
 
+    # ── System routes ──
+
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(web_root / "index.html")
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
+    def health() -> dict[str, Any]:
         return {"status": "ok", "version": APP_VERSION}
 
     @app.get("/api/bootstrap")
@@ -151,86 +196,168 @@ def create_web_app(
         current_settings = runtime["settings"]
         return {
             "version": APP_VERSION,
-            "settings": _serialize_settings(current_settings),
+            "settings": serialize_settings(current_settings),
             "environment": inspect_environment(current_settings),
-            "style_presets": _serialize_style_presets(),
-            "performance_modes": _serialize_performance_modes(),
-            "job": _serialize_current_job(runtime),
-            "history": _serialize_history(runtime),
+            "style_presets": serialize_style_presets(),
+            "performance_modes": serialize_performance_modes(),
+            "job": serialize_current_job(runtime),
+            "history": serialize_history(runtime),
             "license": runtime["license_manager"].status(),
             "update": runtime["update_service"].status(),
-            "creator_profiles": _serialize_creator_profiles(runtime),
+            "creator_profiles": serialize_creator_profiles(runtime),
             "session_token": runtime["session_token"],
+            "providers": serialize_providers(current_settings),
             "available_languages": [
                 {"code": "zh", "label": "中文"},
                 {"code": "en", "label": "English"},
             ],
         }
 
+    # ── Settings routes ──
+
     @app.post("/api/settings")
     def save_settings(payload: SettingsPayload) -> dict[str, Any]:
-        save_user_settings(deepseek_api_key=payload.api_key)
+        save_user_settings(
+            deepseek_api_key=payload.api_key or None,
+            provider_name=payload.provider_name or None,
+            model_name=payload.model_name or None,
+            base_url=payload.base_url or None,
+            provider_api_keys=payload.provider_api_keys or None,
+        )
         _reload_runtime(runtime)
         current_settings = runtime["settings"]
         return {
-            "settings": _serialize_settings(current_settings),
+            "settings": serialize_settings(current_settings),
             "environment": inspect_environment(current_settings),
-            "style_presets": _serialize_style_presets(),
-            "performance_modes": _serialize_performance_modes(),
-            "job": _serialize_current_job(runtime),
-            "history": _serialize_history(runtime),
+            "style_presets": serialize_style_presets(),
+            "performance_modes": serialize_performance_modes(),
+            "job": serialize_current_job(runtime),
+            "history": serialize_history(runtime),
             "license": runtime["license_manager"].status(),
             "update": runtime["update_service"].status(),
-            "creator_profiles": _serialize_creator_profiles(runtime),
+            "creator_profiles": serialize_creator_profiles(runtime),
+            "providers": serialize_providers(current_settings),
         }
+
+    @app.post("/api/settings/test")
+    def test_provider(payload: TestProviderPayload) -> dict[str, Any]:
+        provider = get_provider(payload.provider_name)
+        model = payload.model_name or (provider.models[0] if provider and provider.models else "")
+
+        api_key = payload.api_key
+        custom_base_url = ""
+        if not api_key:
+            try:
+                config_path = runtime["settings"].config_path
+                if config_path.exists():
+                    _user = json.loads(config_path.read_text(encoding="utf-8")) or {}
+                    custom_base_url = _user.get("custom_base_url", "")
+                    enc = _user.get(f"api_key_{payload.provider_name}", "") or _user.get(
+                        "deepseek_api_key_encrypted", ""
+                    )
+                    if enc:
+                        api_key = decrypt_value(enc)
+            except Exception:
+                pass
+        if not api_key and provider:
+            api_key = provider.resolve_api_key()
+
+        base_url = payload.base_url or custom_base_url or (provider.base_url if provider else "")
+
+        if not base_url:
+            return {"success": False, "message": "请填写 API 地址。"}
+        if not api_key and (not provider or provider.name != "ollama"):
+            return {"success": False, "message": "请先输入 API Key。"}
+
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key or "ollama", base_url=base_url, timeout=15)
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+            )
+            return {"success": True, "message": f"连接成功，模型 {model} 可用。"}
+        except Exception as exc:
+            return {"success": False, "message": f"连接失败：{exc}"}
+
+    # ── YouTube routes ──
+
+    @app.post("/api/youtube-login")
+    def youtube_login() -> dict[str, Any]:
+        from ytsubviewer.services.cookie_manager import _find_chrome_db, ensure_cookies
+
+        result = ensure_cookies(runtime["settings"].data_root)
+        if result:
+            return {"success": True, "message": "Cookies 获取成功！"}
+        if not _find_chrome_db():
+            return {"success": False, "message": "未找到 Chrome 浏览器数据。请确认已安装 Chrome 并登录过 YouTube。"}
+        return {"success": False, "message": "Cookies 提取失败，请重试。"}
+
+    @app.post("/api/youtube-extract")
+    def youtube_extract() -> dict[str, Any]:
+        return youtube_login()
+
+    # ── Job routes ──
 
     @app.post("/api/analyze")
     def analyze(payload: AnalyzePayload) -> dict[str, Any]:
         url = payload.url.strip()
         if not url:
             raise HTTPException(status_code=400, detail="请输入 YouTube 链接。")
-        _validate_youtube_url(url)
+        validate_youtube_url(url)
 
         current_pipeline: SubtitlePipeline = runtime["pipeline"]
-        metadata = current_pipeline.analyze(url)
+        try:
+            metadata = current_pipeline.analyze(url)
+        except YouTubeLoginRequired:
+            raise HTTPException(
+                status_code=428, detail="YouTube 需要登录验证，请先点击「登录 YouTube」按钮完成登录。"
+            )
         profile = runtime["creator_profiles"].get_for_metadata(metadata)
-        resolved = _resolve_control_texts(payload, profile)
-        controls = _build_controls(
+        resolved = resolve_control_texts(payload, profile)
+        controls = build_controls(
             resolved["style_preset"],
             resolved["glossary_text"],
             resolved["protected_terms_text"],
         )
         existing_artifacts = current_pipeline.find_existing_artifacts(metadata)
-        state = _state_from_artifacts(current_pipeline, existing_artifacts, controls) if existing_artifacts else None
+        state = state_from_artifacts(current_pipeline, existing_artifacts, controls) if existing_artifacts else None
         controls_match = bool(state and current_pipeline._controls_match_state(state, controls))
 
         return {
-            "metadata": _serialize_metadata(metadata),
-            "strategy_text": _strategy_text(
+            "metadata": serialize_metadata(metadata),
+            "strategy_text": strategy_text(
                 metadata.manual_english_subtitle_lang,
                 metadata.automatic_english_subtitle_lang,
             ),
-            "profile": _serialize_profile(profile),
+            "profile": serialize_profile(profile),
             "resolved_controls": resolved,
             "has_existing_result": state is not None,
             "controls_match": controls_match,
-            "state": _serialize_state(current_pipeline, state) if state else None,
+            "state": serialize_state(current_pipeline, state) if state else None,
         }
 
     @app.post("/api/generate")
-    def generate(payload: AnalyzePayload) -> dict[str, Any]:
+    async def generate(payload: AnalyzePayload) -> dict[str, Any]:
         url = payload.url.strip()
         if not url:
             raise HTTPException(status_code=400, detail="请输入 YouTube 链接。")
-        _validate_youtube_url(url)
+        validate_youtube_url(url)
         if not runtime["settings"].deepseek_api_key:
             raise HTTPException(status_code=400, detail="请先保存 DeepSeek API Key。")
 
         current_pipeline: SubtitlePipeline = runtime["pipeline"]
-        metadata = current_pipeline.analyze(url)
+        try:
+            metadata = current_pipeline.analyze(url)
+        except YouTubeLoginRequired:
+            raise HTTPException(
+                status_code=428, detail="YouTube 需要登录验证，请先点击「登录 YouTube」按钮完成登录。"
+            )
         profile = runtime["creator_profiles"].get_for_metadata(metadata)
-        resolved = _resolve_control_texts(payload, profile)
-        controls = _build_controls(
+        resolved = resolve_control_texts(payload, profile)
+        controls = build_controls(
             resolved["style_preset"],
             resolved["glossary_text"],
             resolved["protected_terms_text"],
@@ -238,7 +365,7 @@ def create_web_app(
         snapshot = runtime["generation_manager"].start_generation(
             url=url,
             metadata=metadata,
-            strategy_text=_strategy_text(
+            strategy_text=strategy_text(
                 metadata.manual_english_subtitle_lang,
                 metadata.automatic_english_subtitle_lang,
             ),
@@ -247,22 +374,22 @@ def create_web_app(
             protected_terms_text=resolved["protected_terms_text"],
             performance_mode=payload.performance_mode,
         )
-        return {"job": _serialize_job(runtime, snapshot)}
+        return {"job": serialize_job(runtime, snapshot)}
 
     @app.post("/api/batch")
-    def batch_generate(payload: BatchPayload) -> dict[str, Any]:
+    async def batch_generate(payload: BatchPayload) -> dict[str, Any]:
         urls = [line.strip() for line in payload.urls_text.replace("\r", "\n").split("\n") if line.strip()]
         if not urls:
             raise HTTPException(status_code=400, detail="请至少输入一个 YouTube 链接。")
         for url in urls:
-            _validate_youtube_url(url)
+            validate_youtube_url(url)
         queued: list[dict[str, Any]] = []
         batch_id = Path(os.urandom(8).hex()).name
         for url in urls:
             metadata = runtime["pipeline"].analyze(url)
             profile = runtime["creator_profiles"].get_for_metadata(metadata)
-            resolved = _resolve_control_texts(payload, profile)
-            controls = _build_controls(
+            resolved = resolve_control_texts(payload, profile)
+            controls = build_controls(
                 resolved["style_preset"],
                 resolved["glossary_text"],
                 resolved["protected_terms_text"],
@@ -270,7 +397,7 @@ def create_web_app(
             snapshot = runtime["generation_manager"].start_generation(
                 url=url,
                 metadata=metadata,
-                strategy_text=_strategy_text(
+                strategy_text=strategy_text(
                     metadata.manual_english_subtitle_lang,
                     metadata.automatic_english_subtitle_lang,
                 ),
@@ -280,55 +407,59 @@ def create_web_app(
                 performance_mode=payload.performance_mode,
                 batch_id=batch_id,
             )
-            queued.append(_serialize_job(runtime, snapshot))
-        return {"jobs": queued, "history": _serialize_history(runtime)}
+            queued.append(serialize_job(runtime, snapshot))
+        return {"jobs": queued, "history": serialize_history(runtime)}
 
     @app.get("/api/job/current")
     def current_job() -> dict[str, Any]:
-        return {"job": _serialize_current_job(runtime)}
+        return {"job": serialize_current_job(runtime)}
 
     @app.get("/api/job/history")
     def job_history() -> dict[str, Any]:
-        return {"jobs": _serialize_history(runtime)}
+        return {"jobs": serialize_history(runtime)}
 
     @app.get("/api/job/{task_id}")
     def job_detail(task_id: str) -> dict[str, Any]:
         snapshot = runtime["generation_manager"].get_task(task_id)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="任务不存在。")
-        return {"job": _serialize_job(runtime, snapshot)}
+        return {"job": serialize_job(runtime, snapshot)}
 
     @app.post("/api/job/{task_id}/cancel")
-    def cancel_job(task_id: str) -> dict[str, Any]:
+    async def cancel_job(task_id: str) -> dict[str, Any]:
         snapshot = runtime["generation_manager"].cancel_task(task_id)
-        return {"job": _serialize_job(runtime, snapshot), "history": _serialize_history(runtime)}
+        return {"job": serialize_job(runtime, snapshot), "history": serialize_history(runtime)}
 
     @app.post("/api/job/{task_id}/retry")
-    def retry_job(task_id: str) -> dict[str, Any]:
+    async def retry_job(task_id: str) -> dict[str, Any]:
         snapshot = runtime["generation_manager"].retry_task(task_id)
-        return {"job": _serialize_job(runtime, snapshot), "history": _serialize_history(runtime)}
+        return {"job": serialize_job(runtime, snapshot), "history": serialize_history(runtime)}
+
+    # ── Export routes ──
 
     @app.post("/api/export")
-    def export_video(payload: ExportPayload) -> dict[str, Any]:
-        state = _load_state_for_work_dir(Path(payload.work_dir))
+    async def export_video(payload: ExportPayload) -> dict[str, Any]:
+        state = load_state_for_work_dir(Path(payload.work_dir))
         snapshot = runtime["generation_manager"].start_export(
             state=state,
             bilingual=payload.bilingual,
             preview=payload.preview,
             performance_mode=payload.performance_mode,
         )
-        return {"job": _serialize_job(runtime, snapshot)}
+        return {"job": serialize_job(runtime, snapshot)}
 
     @app.get("/api/export/{task_id}")
     def export_detail(task_id: str) -> dict[str, Any]:
         snapshot = runtime["generation_manager"].get_task(task_id)
         if snapshot is None or snapshot.kind != "export":
             raise HTTPException(status_code=404, detail="导出任务不存在。")
-        return {"job": _serialize_job(runtime, snapshot)}
+        return {"job": serialize_job(runtime, snapshot)}
+
+    # ── Editor routes ──
 
     @app.get("/api/job/{task_id}/quality")
     def quality_report(task_id: str) -> dict[str, Any]:
-        state = _load_state_for_task(runtime, task_id)
+        state = load_state_for_task(runtime, task_id)
         quality = dict(state.get("quality_report") or {})
         return {
             "quality_report": quality,
@@ -337,44 +468,43 @@ def create_web_app(
 
     @app.get("/api/job/{task_id}/editor")
     def editor_document(task_id: str, issues_only: bool = False, query: str = "") -> dict[str, Any]:
-        state = _load_state_for_task(runtime, task_id)
-        payload = runtime["pipeline"].get_editor_payload(state, issues_only=issues_only, query=query)
-        return payload
+        state = load_state_for_task(runtime, task_id)
+        return runtime["pipeline"].get_editor_payload(state, issues_only=issues_only, query=query)
 
     @app.post("/api/job/{task_id}/cue/update")
     def update_cue(task_id: str, payload: CueUpdatePayload) -> dict[str, Any]:
-        state = _load_state_for_task(runtime, task_id)
+        state = load_state_for_task(runtime, task_id)
         artifacts = runtime["pipeline"].update_cue_translation(state, payload.cue_id, payload.target_text)
         return {
-            "state": _serialize_state(runtime["pipeline"], load_job_state(artifacts.work_dir)),
+            "state": serialize_state(runtime["pipeline"], load_job_state(artifacts.work_dir)),
             "editor": runtime["pipeline"].get_editor_payload(load_job_state(artifacts.work_dir) or {}),
         }
 
     @app.post("/api/job/{task_id}/cue/retranslate")
     def retranslate_cue(task_id: str, payload: CueUpdatePayload) -> dict[str, Any]:
-        state = _load_state_for_task(runtime, task_id)
+        state = load_state_for_task(runtime, task_id)
         artifacts = runtime["pipeline"].retranslate_cue(state, payload.cue_id)
         return {
-            "state": _serialize_state(runtime["pipeline"], load_job_state(artifacts.work_dir)),
+            "state": serialize_state(runtime["pipeline"], load_job_state(artifacts.work_dir)),
             "editor": runtime["pipeline"].get_editor_payload(load_job_state(artifacts.work_dir) or {}),
         }
 
     @app.post("/api/job/{task_id}/cue/lock")
     def lock_cue(task_id: str, payload: CueLockPayload) -> dict[str, Any]:
-        state = _load_state_for_task(runtime, task_id)
+        state = load_state_for_task(runtime, task_id)
         artifacts = runtime["pipeline"].set_cue_lock(state, payload.cue_id, payload.locked)
         return {
-            "state": _serialize_state(runtime["pipeline"], load_job_state(artifacts.work_dir)),
+            "state": serialize_state(runtime["pipeline"], load_job_state(artifacts.work_dir)),
             "editor": runtime["pipeline"].get_editor_payload(load_job_state(artifacts.work_dir) or {}),
         }
 
     @app.post("/api/job/{task_id}/cue/bulk-replace")
     def bulk_replace(task_id: str, payload: BulkReplacePayload) -> dict[str, Any]:
-        state = _load_state_for_task(runtime, task_id)
+        state = load_state_for_task(runtime, task_id)
         artifacts = runtime["pipeline"].bulk_replace_term(state, payload.source_text, payload.target_text)
         refreshed = load_job_state(artifacts.work_dir) or state
         return {
-            "state": _serialize_state(runtime["pipeline"], refreshed),
+            "state": serialize_state(runtime["pipeline"], refreshed),
             "editor": runtime["pipeline"].get_editor_payload(refreshed),
         }
 
@@ -405,7 +535,9 @@ def create_web_app(
             glossary_text=payload.glossary_text,
             protected_terms_text=payload.protected_terms_text,
         )
-        return {"profile": _serialize_profile(profile), "profiles": _serialize_creator_profiles(runtime)}
+        return {"profile": serialize_profile(profile), "profiles": serialize_creator_profiles(runtime)}
+
+    # ── License routes ──
 
     @app.get("/api/license/status")
     def license_status() -> dict[str, Any]:
@@ -419,22 +551,21 @@ def create_web_app(
     def deactivate_license() -> dict[str, Any]:
         return runtime["license_manager"].deactivate()
 
+    @app.post("/api/license/verify")
+    async def verify_license(payload: LicensePayload) -> dict[str, Any]:
+        return await runtime["license_manager"].verify_remote(payload.license_key)
+
+    # ── File routes ──
+
     @app.get("/api/file")
     def download_file(path: str) -> FileResponse:
-        resolved = _resolve_download_path(runtime["settings"], path)
+        resolved = resolve_download_path(runtime["settings"], path)
         return FileResponse(resolved, filename=resolved.name)
 
-    if mount_legacy:
-        try:
-            import gradio as gr
-
-            from ytsubviewer.ui import create_app as create_legacy_app
-
-            app = gr.mount_gradio_app(app, create_legacy_app(), path="/legacy")
-        except Exception:
-            pass
-
     return app
+
+
+# ── Internal helpers ──
 
 
 def _resolve_web_root(current_settings: Settings) -> Path:
@@ -446,166 +577,6 @@ def _resolve_web_root(current_settings: Settings) -> Path:
         if candidate.exists():
             return candidate
     raise RuntimeError("Web frontend assets are missing.")
-
-
-def _serialize_style_presets() -> list[dict[str, str]]:
-    presets = DeepSeekTranslator.available_style_presets()
-    return [
-        {
-            "name": preset.name,
-            "label": preset.label,
-            "description": preset.description,
-        }
-        for preset in presets.values()
-    ]
-
-
-def _serialize_performance_modes() -> list[dict[str, str]]:
-    return [
-        {
-            "name": "fast",
-            "label": "Fast",
-            "description": "优先速度，适合快速预览和短视频批量处理。",
-        },
-        {
-            "name": "balanced",
-            "label": "Balanced",
-            "description": "默认模式，平衡速度、稳定性和导出质量。",
-        },
-        {
-            "name": "quality",
-            "label": "Quality",
-            "description": "优先质量，适合正式交付前的最终成品。",
-        },
-    ]
-
-
-def _serialize_settings(current_settings: Settings) -> dict[str, Any]:
-    return {
-        "api_key_ready": bool(current_settings.deepseek_api_key),
-        "data_root": str(current_settings.data_root),
-        "config_path": str(current_settings.config_path),
-        "prefer_automatic_subtitles": current_settings.prefer_automatic_subtitles,
-        "update_feed_url": current_settings.update_feed_url,
-        "max_concurrent_tasks": current_settings.max_concurrent_tasks,
-        "target_language": current_settings.target_language,
-    }
-
-
-def _serialize_current_job(runtime: dict[str, Any]) -> dict[str, Any] | None:
-    active = runtime["generation_manager"].get_active_task()
-    if active is not None:
-        return _serialize_job(runtime, active)
-    snapshot = runtime["generation_manager"].get_current_snapshot()
-    if snapshot is None:
-        return None
-    return _serialize_job(runtime, snapshot)
-
-
-def _serialize_history(runtime: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
-    tasks = runtime["generation_manager"].list_tasks(limit=limit)
-    return [_serialize_job(runtime, task) for task in tasks]
-
-
-def _serialize_job(runtime: dict[str, Any], snapshot: GenerationJobSnapshot | TaskSnapshot) -> dict[str, Any]:
-    current_pipeline: SubtitlePipeline = runtime["pipeline"]
-    state = _state_from_snapshot(snapshot)
-    return {
-        "job_id": snapshot.task_id,
-        "kind": snapshot.kind,
-        "status": snapshot.status,
-        "stage": snapshot.stage,
-        "progress": snapshot.progress,
-        "progress_percent": max(1, round(snapshot.progress * 100)) if snapshot.status in {"running", "pending"} else 100,
-        "title": snapshot.title,
-        "duration_seconds": snapshot.duration_seconds,
-        "duration_text": format_duration(snapshot.duration_seconds),
-        "strategy_text": snapshot.strategy_text,
-        "thumbnail_url": snapshot.thumbnail_url,
-        "work_dir": snapshot.work_dir,
-        "logs": list(snapshot.log_lines),
-        "error": snapshot.error,
-        "performance_mode": snapshot.performance_mode,
-        "bilingual": snapshot.bilingual,
-        "preview": snapshot.preview,
-        "current_step": snapshot.current_step,
-        "total_steps": snapshot.total_steps,
-        "completed_items": snapshot.completed_items,
-        "total_items": snapshot.total_items,
-        "eta_text": format_eta(snapshot.eta_seconds),
-        "can_retry": snapshot.status in {"failed", "completed", "cancelled"},
-        "can_cancel": snapshot.status in {"pending", "running"},
-        "state": _serialize_state(current_pipeline, state) if state else None,
-    }
-
-
-def _state_from_snapshot(snapshot: GenerationJobSnapshot | TaskSnapshot) -> dict[str, Any] | None:
-    if not snapshot.work_dir:
-        return None
-    return load_job_state(Path(snapshot.work_dir))
-
-
-def _state_from_artifacts(
-    current_pipeline: SubtitlePipeline,
-    artifacts: JobArtifacts | None,
-    controls: TranslationControlConfig,
-) -> dict[str, Any] | None:
-    if artifacts is None:
-        return None
-    artifacts = current_pipeline.ensure_subtitle_artifacts(artifacts)
-    artifacts = current_pipeline.ensure_quality_report(artifacts)
-    state = load_job_state(artifacts.work_dir) or artifacts.to_state()
-    state["translation_controls"] = state.get("translation_controls") or controls.to_dict()
-    return state
-
-
-def _serialize_state(current_pipeline: SubtitlePipeline, state: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not state:
-        return None
-    artifacts = artifacts_from_state(state)
-    if artifacts is not None:
-        artifacts = current_pipeline.ensure_subtitle_artifacts(artifacts)
-        artifacts = current_pipeline.ensure_quality_report(artifacts)
-        state = load_job_state(artifacts.work_dir) or state
-
-    return {
-        "status": str(state.get("status", "")).strip() or "idle",
-        "video_id": state.get("video_id", ""),
-        "title": state.get("title", ""),
-        "duration_seconds": int(state["duration_seconds"]) if state.get("duration_seconds") else None,
-        "duration_text": format_duration(int(state["duration_seconds"])) if state.get("duration_seconds") else "",
-        "source_kind": state.get("source_kind", ""),
-        "work_dir": state.get("work_dir", ""),
-        "downloads": _serialize_downloads(state),
-        "quality_report_path": state.get("quality_report_path", ""),
-        "quality_report": dict(state.get("quality_report") or {}),
-    }
-
-
-def _serialize_downloads(state: dict[str, Any]) -> dict[str, dict[str, str]]:
-    files = {
-        "video": state.get("video_path", ""),
-        "subtitle": state.get("chinese_subtitle_path", ""),
-        "chinese_ass": state.get("chinese_ass_path", ""),
-        "bilingual_ass": state.get("bilingual_ass_path", ""),
-        "quality_report": state.get("quality_report_path", ""),
-        "burned_chinese_video": state.get("burned_chinese_video_path", ""),
-        "burned_bilingual_video": state.get("burned_bilingual_video_path", ""),
-    }
-    payload: dict[str, dict[str, str]] = {}
-    for key, raw_path in files.items():
-        path_text = str(raw_path or "").strip()
-        if not path_text:
-            continue
-        path = Path(path_text)
-        if not path.exists():
-            continue
-        payload[key] = {
-            "path": str(path),
-            "name": path.name,
-            "url": f"/api/file?path={quote(str(path))}",
-        }
-    return payload
 
 
 def _reload_runtime(runtime: dict[str, Any]) -> None:
@@ -624,103 +595,31 @@ def _reload_runtime(runtime: dict[str, Any]) -> None:
     runtime["license_manager"] = LicenseManager(current_settings)
     runtime["update_service"] = UpdateService(current_settings)
 
+    from ytsubviewer.providers import get_default_provider
 
-def _build_controls(style_preset: str, glossary_text: str, protected_terms_text: str) -> TranslationControlConfig:
-    temp_settings = Settings(
-        translation_style_preset=(style_preset or "default").strip() or "default",
-        translation_glossary_json=glossary_text.strip(),
-        translation_protected_terms_json=protected_terms_text.strip(),
-    )
-    return temp_settings.translation_controls()
-
-
-def _strategy_text(manual_lang: str | None, automatic_lang: str | None) -> str:
-    if manual_lang:
-        return f"优先使用人工英文字幕：{manual_lang}"
-    if automatic_lang:
-        return f"未检测到人工英文字幕，将优先使用 YouTube 自动英文字幕：{automatic_lang}"
-    return "未检测到英文字幕，将回退到本地转写。"
-
-
-def _resolve_download_path(current_settings: Settings, raw_path: str) -> Path:
-    path = Path(raw_path).expanduser()
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="文件不存在。")
-
-    resolved = path.resolve()
-    allowed_roots = [
-        current_settings.data_root.resolve(),
-        current_settings.project_root.resolve(),
-        current_settings.config_dir.resolve(),
-    ]
-    if not any(_is_within_root(resolved, root) for root in allowed_roots):
-        raise HTTPException(status_code=403, detail="不允许访问这个文件。")
-    return resolved
-
-
-def _is_within_root(path: Path, root: Path) -> bool:
+    provider = get_provider(current_settings.provider_name) or get_default_provider()
+    stored_key = ""
+    custom_base_url = ""
     try:
-        common = os.path.commonpath([str(path), str(root)])
-    except ValueError:
-        return False
-    return common.lower() == str(root).lower()
-
-
-def _serialize_metadata(metadata) -> dict[str, Any]:
-    return {
-        "video_id": metadata.video_id,
-        "title": metadata.title,
-        "duration_seconds": metadata.duration_seconds,
-        "duration_text": format_duration(metadata.duration_seconds),
-        "thumbnail_url": metadata.thumbnail_url,
-        "channel_id": metadata.channel_id,
-        "channel_name": metadata.channel_name,
-        "uploader": metadata.uploader,
-    }
-
-
-def _serialize_profile(profile) -> dict[str, Any] | None:
-    if profile is None:
-        return None
-    return profile.to_dict()
-
-
-def _serialize_creator_profiles(runtime: dict[str, Any]) -> list[dict[str, Any]]:
-    return [profile.to_dict() for profile in runtime["creator_profiles"].list_profiles()]
-
-
-def _resolve_control_texts(payload: AnalyzePayload | BatchPayload, profile) -> dict[str, str]:
-    style_preset = (payload.style_preset or "default").strip() or "default"
-    glossary_text = payload.glossary_text
-    protected_terms_text = payload.protected_terms_text
-    if getattr(payload, "use_creator_defaults", True) and profile is not None:
-        if style_preset == "default" and profile.style_preset:
-            style_preset = profile.style_preset
-        if not glossary_text.strip() and profile.glossary_text:
-            glossary_text = profile.glossary_text
-        if not protected_terms_text.strip() and profile.protected_terms_text:
-            protected_terms_text = profile.protected_terms_text
-    return {
-        "style_preset": style_preset,
-        "glossary_text": glossary_text,
-        "protected_terms_text": protected_terms_text,
-    }
-
-
-def _load_state_for_work_dir(work_dir: Path) -> dict[str, Any]:
-    state = load_job_state(work_dir)
-    if not state:
-        raise HTTPException(status_code=404, detail="当前任务缺少可用状态，请先生成字幕。")
-    return state
-
-
-def _load_state_for_task(runtime: dict[str, Any], task_id: str) -> dict[str, Any]:
-    snapshot = runtime["generation_manager"].get_task(task_id)
-    if snapshot is None:
-        raise HTTPException(status_code=404, detail="任务不存在。")
-    if not snapshot.work_dir:
-        raise HTTPException(status_code=400, detail="当前任务还没有可编辑结果。")
-    state = load_job_state(Path(snapshot.work_dir))
-    if not state:
-        raise HTTPException(status_code=404, detail="当前任务缺少可编辑状态。")
-    return state
+        if current_settings.config_path.exists():
+            _user = json.loads(current_settings.config_path.read_text(encoding="utf-8")) or {}
+            enc = _user.get(f"api_key_{provider.name}", "") or _user.get("deepseek_api_key_encrypted", "")
+            if enc:
+                stored_key = decrypt_value(enc)
+            custom_base_url = str(_user.get("custom_base_url", "")).strip()
+    except Exception:
+        pass
+    if not stored_key:
+        stored_key = current_settings.deepseek_api_key or ""
+    if stored_key:
+        provider.api_key = stored_key
+    if custom_base_url:
+        provider = ModelProvider(
+            name=provider.name,
+            label=provider.label,
+            base_url=custom_base_url,
+            models=provider.models,
+            api_key_env=provider.api_key_env,
+            api_key=provider.api_key,
+        )
+    runtime["pipeline"].translator.provider = provider

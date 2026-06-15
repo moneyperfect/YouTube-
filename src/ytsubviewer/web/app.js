@@ -5,6 +5,7 @@ const appState = {
   pollTick: 0,
   stylePresets: [],
   performanceModes: [],
+  providers: [],
   currentEditor: null,
   sessionToken: "",
   language: localStorage.getItem("ytsubviewer-lang") || "zh",
@@ -12,6 +13,10 @@ const appState = {
 
 const elements = {
   appVersion: document.getElementById("app-version"),
+  presetChips: document.getElementById("preset-chips"),
+  providerUrlInput: document.getElementById("provider-url-input"),
+  modelInput: document.getElementById("model-input"),
+  modelSuggestions: document.getElementById("model-suggestions"),
   urlInput: document.getElementById("url-input"),
   analyzeButton: document.getElementById("analyze-button"),
   generateButton: document.getElementById("generate-button"),
@@ -56,10 +61,14 @@ const elements = {
   qualitySummary: document.getElementById("quality-summary"),
   qualityIssues: document.getElementById("quality-issues"),
   editorList: document.getElementById("editor-list"),
+  providerSelect: document.getElementById("provider-select"),
+  modelSelect: document.getElementById("model-select"),
   apiKeyInput: document.getElementById("api-key-input"),
   saveSettingsButton: document.getElementById("save-settings-button"),
+  testProviderButton: document.getElementById("test-provider-button"),
   refreshButton: document.getElementById("refresh-button"),
   settingsStatus: document.getElementById("settings-status"),
+  testResult: document.getElementById("test-result"),
   dataRoot: document.getElementById("data-root"),
   configPath: document.getElementById("config-path"),
   environmentStatus: document.getElementById("environment-status"),
@@ -71,6 +80,10 @@ const elements = {
   updateStatus: document.getElementById("update-status"),
   historyList: document.getElementById("history-list"),
   languageSelect: document.getElementById("language-select"),
+  licenseOverlay: document.getElementById("license-overlay"),
+  licenseOverlayInput: document.getElementById("license-overlay-input"),
+  licenseOverlaySubmit: document.getElementById("license-overlay-submit"),
+  licenseOverlayMessage: document.getElementById("license-overlay-message"),
 };
 
 async function request(path, options = {}) {
@@ -84,7 +97,13 @@ async function request(path, options = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || t("status.failed"));
+    const detail = data.detail;
+    const message = Array.isArray(detail)
+      ? detail.map((e) => e.msg || JSON.stringify(e)).join("; ")
+      : typeof detail === "string"
+        ? detail
+        : JSON.stringify(detail || data);
+    throw new Error(message || t("status.failed"));
   }
   return data;
 }
@@ -98,12 +117,50 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function refreshIcons() {
+  if (window.lucide) {
+    lucide.createIcons();
+  }
+}
+
+// ── Toast notifications ──
+let toastTimeout = null;
+function showToast(message, type = "info") {
+  let toast = document.querySelector(".toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "toast";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.className = `toast ${type}`;
+  clearTimeout(toastTimeout);
+  requestAnimationFrame(() => {
+    toast.classList.add("show");
+  });
+  toastTimeout = setTimeout(() => {
+    toast.classList.remove("show");
+  }, 3000);
+}
+
+function setButtonLoading(button, loading) {
+  if (!button) return;
+  if (loading) {
+    button.classList.add("loading");
+    button.disabled = true;
+  } else {
+    button.classList.remove("loading");
+    button.disabled = false;
+  }
+}
+
 function setActionBusy(isBusy) {
   [
     elements.analyzeButton,
     elements.generateButton,
     elements.queueBatchButton,
     elements.saveSettingsButton,
+    elements.testProviderButton,
     elements.refreshButton,
     elements.saveProfileButton,
     elements.activateLicenseButton,
@@ -111,6 +168,11 @@ function setActionBusy(isBusy) {
   ].forEach((button) => {
     if (button) {
       button.disabled = isBusy;
+      if (isBusy) {
+        button.classList.add("loading");
+      } else {
+        button.classList.remove("loading");
+      }
     }
   });
 }
@@ -161,6 +223,148 @@ function renderPerformanceModes(modes) {
     .join("");
   if (appState.performanceModes.some((item) => item.name === "balanced")) {
     elements.performanceSelect.value = "balanced";
+  }
+}
+
+function renderProviders(providers, settings) {
+  appState.providers = providers || [];
+  const currentProvider = (settings && settings.provider_name) || "deepseek";
+
+  // Render preset chips
+  renderPresetChips(currentProvider);
+
+  // Fill fields from current provider
+  const provider = appState.providers.find((p) => p.name === currentProvider);
+  const customBaseUrl = (settings && settings.custom_base_url) || "";
+  if (provider) {
+    elements.providerUrlInput.value = customBaseUrl || provider.base_url || "";
+    if (provider.has_key) {
+      elements.apiKeyInput.placeholder = "已保存 (留空则保留原值)";
+    } else if (provider.name === "ollama") {
+      elements.apiKeyInput.placeholder = "本地模型无需 Key";
+    } else {
+      elements.apiKeyInput.placeholder = `输入 ${provider.label} 的 API Key`;
+    }
+  } else if (customBaseUrl) {
+    elements.providerUrlInput.value = customBaseUrl;
+  }
+
+  // Set model
+  const currentModel = (settings && settings.model_name) || (provider && provider.models[0]) || "";
+  elements.modelInput.value = currentModel;
+
+  // Build model list: current model first (if custom), then provider defaults
+  const providerModels = provider ? [...provider.models] : [];
+  if (currentModel && !providerModels.includes(currentModel)) {
+    providerModels.unshift(currentModel);
+  }
+
+  // Update hidden selects for backward compatibility
+  elements.providerSelect.innerHTML = appState.providers
+    .map((p) => `<option value="${escapeHtml(p.name)}">${escapeHtml(p.label)}</option>`)
+    .join("");
+  elements.providerSelect.value = currentProvider;
+  elements.modelSelect.innerHTML = providerModels
+    .map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`)
+    .join("");
+  elements.modelSelect.value = currentModel;
+
+  // Show model suggestions
+  renderModelSuggestions(providerModels);
+}
+
+function renderPresetChips(activeName) {
+  const chips = appState.providers.map((p) => {
+    const active = p.name === activeName ? " active" : "";
+    const keyDot = p.has_key || p.name === "ollama" ? "background:var(--success)" : "background:var(--muted-soft)";
+    return `<button type="button" class="preset-chip${active}" data-provider="${escapeHtml(p.name)}">
+      <span class="chip-dot" style="${keyDot}"></span>
+      ${escapeHtml(p.label)}
+    </button>`;
+  });
+  elements.presetChips.innerHTML = chips.join("");
+
+  // Bind click events
+  elements.presetChips.querySelectorAll(".preset-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const name = chip.dataset.provider;
+      selectProvider(name);
+    });
+  });
+}
+
+function selectProvider(name) {
+  const provider = appState.providers.find((p) => p.name === name);
+  if (!provider) return;
+
+  // Update active chip
+  elements.presetChips.querySelectorAll(".preset-chip").forEach((chip) => {
+    chip.classList.toggle("active", chip.dataset.provider === name);
+  });
+
+  // Update fields
+  elements.providerUrlInput.value = provider.base_url || "";
+  elements.providerSelect.value = name;
+
+  if (provider.name === "ollama") {
+    elements.apiKeyInput.placeholder = "本地模型无需 Key";
+    elements.apiKeyInput.value = "";
+  } else if (provider.has_key) {
+    elements.apiKeyInput.placeholder = "已保存 (留空则保留原值)";
+  } else {
+    elements.apiKeyInput.placeholder = `输入 ${provider.label} 的 API Key`;
+  }
+
+  // Set first model
+  if (provider.models.length > 0) {
+    elements.modelInput.value = provider.models[0];
+    elements.modelSelect.value = provider.models[0];
+  }
+
+  renderModelSuggestions(provider.models);
+}
+
+function renderModelSuggestions(models) {
+  elements.modelSuggestions.innerHTML = models
+    .map((m) => `<button type="button" class="model-suggestion">${escapeHtml(m)}</button>`)
+    .join("");
+
+  elements.modelSuggestions.querySelectorAll(".model-suggestion").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      elements.modelInput.value = btn.textContent;
+      elements.modelSelect.value = btn.textContent;
+      elements.modelSuggestions.classList.remove("open");
+    });
+  });
+}
+
+async function testProvider() {
+  const providerName = elements.providerSelect.value;
+  const modelName = elements.modelInput.value.trim() || elements.modelSelect.value;
+  const apiKey = elements.apiKeyInput.value.trim();
+  const baseUrl = elements.providerUrlInput.value.trim();
+
+  setButtonLoading(elements.testProviderButton, true);
+  elements.testResult.style.display = "block";
+  elements.testResult.textContent = "测试中...";
+  elements.testResult.style.color = "inherit";
+
+  try {
+    const payload = await request("/api/settings/test", {
+      method: "POST",
+      body: JSON.stringify({
+        provider_name: providerName,
+        model_name: modelName,
+        api_key: apiKey,
+        base_url: baseUrl,
+      }),
+    });
+    elements.testResult.textContent = payload.message;
+    showToast(payload.success ? "连接成功" : "连接失败", payload.success ? "success" : "error");
+    elements.testResult.style.color = payload.success ? "#22c55e" : "#ef4444";
+  } catch (error) {
+    elements.testResult.textContent = `测试失败：${error.message}`;
+    elements.testResult.style.color = "#ef4444";
   }
 }
 
@@ -279,6 +483,7 @@ function renderDownloads(state) {
   elements.previewBilingualButton.disabled = !hasWorkDir;
   elements.loadEditorButton.disabled = !hasWorkDir || !appState.currentTaskId;
   elements.bulkReplaceButton.disabled = !hasWorkDir || !appState.currentTaskId;
+  refreshIcons();
 }
 
 function statusTextForTask(job) {
@@ -350,6 +555,7 @@ function renderTask(job) {
   if (job.status === "running" || job.status === "pending") {
     startPolling();
   }
+  refreshIcons();
 }
 
 function renderHistory(jobs) {
@@ -365,6 +571,7 @@ function renderHistory(jobs) {
   elements.historyList.innerHTML = cards.length
     ? cards.join("")
     : `<div class="empty-state">${t("history.empty")}</div>`;
+  refreshIcons();
 }
 
 function renderQuality(state) {
@@ -441,13 +648,24 @@ async function bootstrap() {
 
     const payload = await request("/api/bootstrap", { method: "GET" });
     appState.sessionToken = payload.session_token || "";
+
+    // 检查激活状态，未激活时显示全屏遮罩
+    const license = payload.license;
+    if (license && !license.active) {
+      showLicenseOverlay();
+    } else {
+      hideLicenseOverlay();
+    }
+
     renderStylePresets(payload.style_presets);
     renderPerformanceModes(payload.performance_modes);
+    renderProviders(payload.providers || [], payload.settings);
     renderEnvironment(payload);
     renderLicense(payload.license);
     renderUpdate(payload.update);
     renderHistory(payload.history);
     renderTask(payload.job);
+    refreshIcons();
   } catch (error) {
     elements.settingsStatus.textContent = error.message;
   } finally {
@@ -455,8 +673,63 @@ async function bootstrap() {
   }
 }
 
+function showLicenseOverlay() {
+  if (elements.licenseOverlay) {
+    elements.licenseOverlay.style.display = "flex";
+  }
+}
+
+function hideLicenseOverlay() {
+  if (elements.licenseOverlay) {
+    elements.licenseOverlay.style.display = "none";
+  }
+}
+
+async function submitLicenseOverlay() {
+  const key = (elements.licenseOverlayInput?.value || "").trim();
+  if (!key) {
+    elements.licenseOverlayMessage.textContent = "请输入激活码。";
+    return;
+  }
+  elements.licenseOverlayMessage.textContent = "正在验证...";
+  elements.licenseOverlayMessage.style.color = "var(--muted)";
+  elements.licenseOverlaySubmit.disabled = true;
+
+  try {
+    // 优先尝试远程验证
+    let payload;
+    try {
+      payload = await request("/api/license/verify", {
+        method: "POST",
+        body: JSON.stringify({ license_key: key }),
+      });
+    } catch {
+      // 远程验证不可用时回退到本地激活
+      payload = await request("/api/license/activate", {
+        method: "POST",
+        body: JSON.stringify({ license_key: key }),
+      });
+    }
+
+    if (payload && payload.active) {
+      hideLicenseOverlay();
+      renderLicense(payload);
+      elements.licenseOverlayMessage.textContent = "";
+    } else {
+      elements.licenseOverlayMessage.textContent = "激活码无效或已过期。";
+      elements.licenseOverlayMessage.style.color = "var(--danger)";
+    }
+  } catch (error) {
+    elements.licenseOverlayMessage.textContent = error.message;
+    elements.licenseOverlayMessage.style.color = "var(--danger)";
+  } finally {
+    elements.licenseOverlaySubmit.disabled = false;
+  }
+}
+
 async function analyzeVideo() {
-  setActionBusy(true);
+  setButtonLoading(elements.analyzeButton, true);
+  showToast("正在分析视频...", "info");
   try {
     const payload = await request("/api/analyze", {
       method: "POST",
@@ -488,17 +761,74 @@ async function analyzeVideo() {
     } else {
       renderTask(null);
       renderLogs([t("button.generate").includes("生成") ? "分析完成，可以开始生成中文字幕。" : "Analysis complete. Ready to generate subtitles."]);
+      showToast("分析完成", "success");
     }
   } catch (error) {
-    renderLogs([], error.message);
+    if (error.message && error.message.includes("YouTube") && error.message.includes("登录")) {
+      renderLogs([], error.message);
+      showYoutubeLoginPrompt();
+      showToast("YouTube 需要登录", "error");
+    } else {
+      renderLogs([], error.message);
+      showToast(error.message, "error");
+    }
     elements.jobStatusTitle.textContent = t("status.failed");
   } finally {
     setActionBusy(false);
   }
 }
 
+function showYoutubeLoginPrompt() {
+  if (!elements.jobLogs) return;
+
+  const container = document.createElement("div");
+  container.style.cssText = "margin-top:16px;padding:16px;border-radius:12px;background:rgba(0,0,0,0.05);";
+
+  const msg = document.createElement("p");
+  msg.style.cssText = "margin:0 0 12px;font-size:14px;line-height:1.6;";
+  msg.textContent = "YouTube 需要从你的 Chrome 浏览器获取登录信息。";
+  container.appendChild(msg);
+
+  const btn = document.createElement("button");
+  btn.textContent = "获取 YouTube Cookies";
+  btn.style.cssText = "padding:10px 24px;border-radius:10px;cursor:pointer;font-size:14px;border:none;background:#e76f51;color:white;font-weight:500;";
+  container.appendChild(btn);
+
+  const status = document.createElement("p");
+  status.style.cssText = "margin:8px 0 0;font-size:13px;color:#666;";
+  container.appendChild(status);
+
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.style.opacity = "0.6";
+    status.textContent = "正在获取...";
+
+    try {
+      const result = await request("/api/youtube-login", { method: "POST" });
+      if (result.success) {
+        status.textContent = result.message;
+        btn.textContent = "成功";
+        btn.style.background = "#4ade80";
+        return;
+      }
+
+      status.textContent = result.message || "获取失败，请重试。";
+      status.style.color = "#e76f51";
+      btn.disabled = false;
+      btn.style.opacity = "1";
+    } catch (e) {
+      status.textContent = e.message;
+      btn.disabled = false;
+      btn.style.opacity = "1";
+    }
+  };
+
+  elements.jobLogs.appendChild(container);
+}
+
 async function generateSubtitle() {
-  setActionBusy(true);
+  setButtonLoading(elements.generateButton, true);
+  showToast("正在提交翻译任务...", "info");
   try {
     const payload = await request("/api/generate", {
       method: "POST",
@@ -506,8 +836,16 @@ async function generateSubtitle() {
     });
     renderTask(payload.job);
     renderHistory((await request("/api/job/history", { method: "GET" })).jobs);
+    showToast("任务已提交，开始翻译", "success");
   } catch (error) {
-    renderLogs([], error.message);
+    if (error.message && error.message.includes("YouTube") && error.message.includes("登录")) {
+      renderLogs([], error.message);
+      showYoutubeLoginPrompt();
+      showToast("YouTube 需要登录", "error");
+    } else {
+      renderLogs([], error.message);
+      showToast(error.message, "error");
+    }
     elements.jobStatusTitle.textContent = t("status.failed");
   } finally {
     setActionBusy(false);
@@ -534,21 +872,47 @@ async function queueBatch() {
 }
 
 async function saveSettings() {
-  setActionBusy(true);
+  setButtonLoading(elements.saveSettingsButton, true);
+  showToast("正在保存设置...", "info");
   try {
+    const providerName = elements.providerSelect.value;
+    const modelName = elements.modelInput.value.trim() || elements.modelSelect.value;
+    const apiKey = elements.apiKeyInput.value.trim();
+    const baseUrl = elements.providerUrlInput.value.trim();
+
+    // Build provider_api_keys map
+    const providerApiKeys = {};
+    if (providerName && apiKey) {
+      providerApiKeys[providerName] = apiKey;
+    }
+
     const payload = await request("/api/settings", {
       method: "POST",
-      body: JSON.stringify({ api_key: elements.apiKeyInput.value.trim() }),
+      body: JSON.stringify({
+        api_key: apiKey,
+        provider_name: providerName,
+        model_name: modelName,
+        base_url: baseUrl,
+        provider_api_keys: providerApiKeys,
+      }),
     });
     renderStylePresets(payload.style_presets);
     renderPerformanceModes(payload.performance_modes);
+    if (payload.providers) {
+      renderProviders(payload.providers, payload.settings);
+    }
     renderEnvironment(payload);
     renderLicense(payload.license);
     renderUpdate(payload.update);
     renderHistory(payload.history);
     renderTask(payload.job);
+    elements.settingsStatus.textContent = "设置已保存。";
+    elements.settingsStatus.style.color = "var(--success)";
+    showToast("设置已保存", "success");
   } catch (error) {
     elements.settingsStatus.textContent = error.message;
+    elements.settingsStatus.style.color = "var(--danger)";
+    showToast(error.message, "error");
   } finally {
     setActionBusy(false);
   }
@@ -741,6 +1105,30 @@ function stopPolling() {
 }
 
 elements.styleSelect.addEventListener("change", updateStyleDescription);
+elements.providerSelect.addEventListener("change", () => {
+  selectProvider(elements.providerSelect.value);
+});
+elements.testProviderButton.addEventListener("click", testProvider);
+
+// Model input suggestions
+elements.modelInput.addEventListener("focus", () => {
+  elements.modelSuggestions.classList.add("open");
+});
+elements.modelInput.addEventListener("blur", () => {
+  setTimeout(() => elements.modelSuggestions.classList.remove("open"), 200);
+});
+elements.modelInput.addEventListener("input", () => {
+  const query = elements.modelInput.value.toLowerCase();
+  const provider = appState.providers.find((p) => p.name === elements.providerSelect.value);
+  if (!provider) return;
+  const filtered = provider.models.filter((m) => m.toLowerCase().includes(query));
+  renderModelSuggestions(filtered.length > 0 ? filtered : provider.models);
+  elements.modelSuggestions.classList.add("open");
+  // Sync hidden select
+  if (provider.models.includes(elements.modelInput.value)) {
+    elements.modelSelect.value = elements.modelInput.value;
+  }
+});
 elements.analyzeButton.addEventListener("click", analyzeVideo);
 elements.generateButton.addEventListener("click", generateSubtitle);
 elements.queueBatchButton.addEventListener("click", queueBatch);
@@ -759,6 +1147,18 @@ elements.loadEditorButton.addEventListener("click", loadEditor);
 elements.bulkReplaceButton.addEventListener("click", runBulkReplace);
 elements.activateLicenseButton.addEventListener("click", activateLicense);
 elements.deactivateLicenseButton.addEventListener("click", deactivateLicense);
+
+// License overlay
+if (elements.licenseOverlaySubmit) {
+  elements.licenseOverlaySubmit.addEventListener("click", submitLicenseOverlay);
+}
+if (elements.licenseOverlayInput) {
+  elements.licenseOverlayInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      submitLicenseOverlay();
+    }
+  });
+}
 
 if (elements.languageSelect) {
   elements.languageSelect.addEventListener("change", (e) => setLanguage(e.target.value));
@@ -809,6 +1209,29 @@ elements.editorList.addEventListener("click", async (event) => {
   } catch (error) {
     row.insertAdjacentHTML("afterbegin", `<div class="log-line error">${escapeHtml(error.message)}</div>`);
   }
+});
+
+// Sidebar navigation
+document.querySelectorAll(".nav-item").forEach((item) => {
+  item.addEventListener("click", (e) => {
+    e.preventDefault();
+    const section = item.dataset.section;
+    if (!section) return;
+
+    // Update active nav item
+    document.querySelectorAll(".nav-item").forEach((nav) => nav.classList.remove("active"));
+    item.classList.add("active");
+
+    // Show target section
+    document.querySelectorAll(".page-section").forEach((sec) => {
+      sec.classList.toggle("active", sec.id === section);
+    });
+
+    // Refresh icons
+    if (window.lucide) {
+      lucide.createIcons();
+    }
+  });
 });
 
 bootstrap();

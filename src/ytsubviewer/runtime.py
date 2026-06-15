@@ -84,6 +84,8 @@ def prepare_runtime_environment(settings: Settings) -> None:
     os.environ["FFMPEG_COMMAND"] = settings.ffmpeg_command
     os.environ["MPV_COMMAND"] = settings.mpv_command
     os.environ["YTSUBVIEWER_DATA_ROOT"] = str(settings.data_root)
+    # 禁止 faster-whisper 在运行时联网下载模型
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
     path_parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
     prepend_dirs: list[str] = []

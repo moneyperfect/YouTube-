@@ -92,7 +92,6 @@
   "player.hint": "Player and export results will appear here.",
   "player.no_result": "No playable results yet.",
   "player.gen_first": "Please generate subtitles first.",
-  "legacy.link": "Legacy Advanced Tools",
   "auth.status_label": "License Status",
   "auth.mode": "Mode: {mode} / Status: {status}",
   "auth.version": "Version: {version}",

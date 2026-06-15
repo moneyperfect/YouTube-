@@ -8,12 +8,13 @@ from collections.abc import Generator
 from pathlib import Path
 
 from ytsubviewer.config import Settings
+from ytsubviewer.services.base import BaseService
 from ytsubviewer.utils import format_eta, program_exists
 
 
-class VideoExportService:
+class VideoExportService(BaseService):
     def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+        super().__init__(settings)
 
     def burn_video_events(
         self,

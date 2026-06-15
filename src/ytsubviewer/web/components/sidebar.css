@@ -1,0 +1,99 @@
+/* Sidebar component styles */
+
+.sidebar {
+  width: var(--sidebar-width);
+  background: var(--canvas);
+  border-right: 1px solid var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 100;
+}
+
+.sidebar-header {
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--surface-soft);
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: "Georgia", "Noto Serif SC", "Source Han Serif SC", serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.sidebar-brand svg {
+  width: 22px;
+  height: 22px;
+  color: var(--accent);
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: all 140ms ease;
+}
+
+.nav-item:hover {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.nav-item svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.sidebar-footer {
+  padding: 16px;
+  border-top: 1px solid var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-select {
+  min-height: 36px;
+  padding: 6px 32px 6px 12px;
+  font-size: 0.82rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.sidebar-refresh {
+  width: 100%;
+  justify-content: center;
+  min-height: 36px;
+  font-size: 0.82rem;
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -7,24 +8,61 @@ from yt_dlp import YoutubeDL
 
 from ytsubviewer.config import Settings
 from ytsubviewer.models import VideoMetadata
+from ytsubviewer.services.base import BaseService
 from ytsubviewer.utils import find_first, slugify_filename
 
+logger = logging.getLogger(__name__)
 
-class YouTubeService:
+
+class YouTubeLoginRequired(Exception):
+    """Raised when YouTube requires user login to proceed."""
+
+
+class YouTubeService(BaseService):
     def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+        super().__init__(settings)
+
+    def _ensure_cookies(self) -> Path | None:
+        """Ensure cookies.txt exists and is fresh. Auto-fetches via Playwright if needed."""
+        from ytsubviewer.services.cookie_manager import ensure_cookies
+        return ensure_cookies(self.settings.data_root)
+
+    def _ydl_options(self, **overrides) -> dict[str, Any]:
+        opts: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+        }
+        opts.update(overrides)
+        cookies_path = self._ensure_cookies()
+        if cookies_path and cookies_path.exists():
+            opts["cookiefile"] = str(cookies_path)
+        return opts
+
+    def _ydl_extract_with_fallback(self, url: str, opts: dict[str, Any]) -> dict[str, Any]:
+        try:
+            with YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        except Exception as first_err:
+            if "Sign in" not in str(first_err) and "bot" not in str(first_err):
+                raise
+            logger.warning("Bot detection triggered, trying Chrome cookie extraction...")
+            cookies_file = self.settings.data_root / "cookies.txt"
+            if cookies_file.exists():
+                cookies_file.unlink(missing_ok=True)
+            # Try extracting from Chrome (works if Chrome is not running)
+            from ytsubviewer.services.cookie_manager import ensure_cookies as _ensure
+            result = _ensure(self.settings.data_root)
+            if result and result.exists():
+                opts["cookiefile"] = str(result)
+                with YoutubeDL(opts) as ydl:
+                    return ydl.extract_info(url, download=False)
+            raise YouTubeLoginRequired(
+                "YouTube 需要登录信息。请关闭 Chrome 后点击「获取 Cookies」按钮，系统会自动提取你 Chrome 中的 YouTube 登录信息并重启 Chrome。"
+            ) from first_err
 
     def extract_metadata(self, url: str) -> VideoMetadata:
-        with YoutubeDL(
-            {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "skip_download": True,
-            }
-        ) as ydl:
-            info = ydl.extract_info(url, download=False)
-
+        info = self._ydl_extract_with_fallback(url, self._ydl_options(skip_download=True))
         return VideoMetadata(
             video_id=str(info["id"]),
             title=info.get("title") or str(info["id"]),
@@ -106,17 +144,13 @@ class YouTubeService:
 
     def download_video(self, url: str, work_dir: Path) -> Path:
         template = str(work_dir / "video.%(ext)s")
-        with YoutubeDL(
-            {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "format": self.settings.yt_format,
-                "merge_output_format": "mp4",
-                "outtmpl": template,
-                "ffmpeg_location": str(Path(self.settings.ffmpeg_command).parent),
-            }
-        ) as ydl:
+        opts = self._ydl_options(
+            format=self.settings.yt_format,
+            merge_output_format="mp4",
+            outtmpl=template,
+            ffmpeg_location=str(Path(self.settings.ffmpeg_command).parent),
+        )
+        with YoutubeDL(opts) as ydl:
             ydl.download([url])
 
         video = self.find_existing_video(work_dir)
@@ -129,19 +163,15 @@ class YouTubeService:
             return None
 
         template = str(work_dir / "source.%(ext)s")
-        with YoutubeDL(
-            {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "skip_download": True,
-                "writesubtitles": True,
-                "writeautomaticsub": False,
-                "subtitleslangs": [language],
-                "subtitlesformat": "vtt/best",
-                "outtmpl": template,
-            }
-        ) as ydl:
+        opts = self._ydl_options(
+            skip_download=True,
+            writesubtitles=True,
+            writeautomaticsub=False,
+            subtitleslangs=[language],
+            subtitlesformat="vtt/best",
+            outtmpl=template,
+        )
+        with YoutubeDL(opts) as ydl:
             ydl.download([url])
 
         return self.find_existing_subtitle(work_dir)
@@ -151,19 +181,15 @@ class YouTubeService:
             return None
 
         template = str(work_dir / "source.auto.%(ext)s")
-        with YoutubeDL(
-            {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "skip_download": True,
-                "writesubtitles": False,
-                "writeautomaticsub": True,
-                "subtitleslangs": [language],
-                "subtitlesformat": "vtt/best",
-                "outtmpl": template,
-            }
-        ) as ydl:
+        opts = self._ydl_options(
+            skip_download=True,
+            writesubtitles=False,
+            writeautomaticsub=True,
+            subtitleslangs=[language],
+            subtitlesformat="vtt/best",
+            outtmpl=template,
+        )
+        with YoutubeDL(opts) as ydl:
             ydl.download([url])
 
         return self.find_existing_subtitle(work_dir)

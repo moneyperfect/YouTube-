@@ -1,14 +1,13 @@
-version: "3.8"
 services:
-  ytsubviewer:
+  web:
     build: .
     ports:
       - "8000:8000"
     volumes:
       - ytsubviewer-data:/data
     environment:
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      - YTSUBVIEWER_DATA_ROOT=/data
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      YTSUBVIEWER_DATA_ROOT: /data
     restart: unless-stopped
 
 volumes:

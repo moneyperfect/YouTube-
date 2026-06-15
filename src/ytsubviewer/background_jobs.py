@@ -107,6 +107,8 @@ class TaskCancelledError(RuntimeError):
 
 
 class BackgroundGenerationManager:
+    """本地后台任务管理器，基于 threading 实现单机并发队列。"""
+
     def __init__(self, settings: Settings, pipeline) -> None:
         self.settings = settings
         self.pipeline = pipeline
@@ -175,6 +177,7 @@ class BackgroundGenerationManager:
             )
             self._tasks[snapshot.task_id] = snapshot
             self._write_snapshot_unlocked(snapshot)
+
             self._dispatch_next_unlocked()
             return snapshot
 
@@ -226,6 +229,7 @@ class BackgroundGenerationManager:
             )
             self._tasks[snapshot.task_id] = snapshot
             self._write_snapshot_unlocked(snapshot)
+
             self._dispatch_next_unlocked()
             return snapshot
 
@@ -261,12 +265,12 @@ class BackgroundGenerationManager:
         except (OSError, json.JSONDecodeError):
             return None
         snapshot = TaskSnapshot.from_dict(payload)
-        if snapshot.status in {"pending", "running"} and not self._is_thread_alive(snapshot.task_id):
+        if snapshot.status in {"pending", "running"} and not self._has_active_worker(snapshot.task_id):
             idle_seconds = time.time() - snapshot.updated_at
             if idle_seconds > 8:
                 snapshot.status = "failed"
                 snapshot.stage = "failed"
-                snapshot.error = snapshot.error or "后台任务已中断，请重新开始生成。 (涓柇)"
+                snapshot.error = snapshot.error or "后台任务已中断，请重新开始生成。"
                 snapshot.log_lines = self._append_log(snapshot.log_lines, snapshot.error)
                 snapshot.finished_at = time.time()
                 self.current_snapshot_path.write_text(
@@ -341,6 +345,8 @@ class BackgroundGenerationManager:
             performance_mode=snapshot.performance_mode,
             source_task_id=snapshot.source_task_id or snapshot.task_id,
         )
+
+    # ── Threading (local mode) ──
 
     def _load_persisted_tasks(self) -> None:
         for path in sorted(self.tasks_dir.glob("*.json")):
@@ -583,7 +589,7 @@ class BackgroundGenerationManager:
             encoding="utf-8",
         )
 
-    def _is_thread_alive(self, task_id: str) -> bool:
+    def _has_active_worker(self, task_id: str) -> bool:
         with self._lock:
             thread = self._worker_threads.get(task_id)
             return thread is not None and thread.is_alive()

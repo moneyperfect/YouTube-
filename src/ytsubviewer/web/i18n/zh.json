@@ -92,7 +92,6 @@
   "player.hint": "播放器和导出结果会显示在这里。",
   "player.no_result": "还没有可播放的结果。",
   "player.gen_first": "请先生成字幕。",
-  "legacy.link": "旧版高级工具",
   "auth.status_label": "授权状态",
   "auth.mode": "模式：{mode} / 状态：{status}",
   "auth.version": "版本：{version}",

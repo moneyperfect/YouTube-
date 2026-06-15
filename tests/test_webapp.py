@@ -50,7 +50,7 @@ class WebAppTests(unittest.TestCase):
                 xdg_cache_home=base / "cache",
                 deepseek_api_key="dummy",
             )
-            app = create_web_app(app_runtime_settings=settings, mount_legacy=False)
+            app = create_web_app(app_runtime_settings=settings)
             response = self._request(app, "GET", "/api/bootstrap")
 
             self.assertEqual(response.status_code, 200)
@@ -94,7 +94,6 @@ class WebAppTests(unittest.TestCase):
                 app_runtime_settings=settings,
                 pipeline=fake_pipeline,
                 generation_manager=BackgroundGenerationManager(settings, fake_pipeline),
-                mount_legacy=False,
             )
             response = self._request(
                 app,
@@ -161,7 +160,6 @@ class WebAppTests(unittest.TestCase):
                 app_runtime_settings=settings,
                 pipeline=SubtitlePipeline(settings),
                 generation_manager=manager,
-                mount_legacy=False,
             )
             response = self._request(app, "GET", "/api/job/current")
 
@@ -251,7 +249,6 @@ class WebAppTests(unittest.TestCase):
                 app_runtime_settings=settings,
                 pipeline=fake_pipeline,
                 generation_manager=manager,
-                mount_legacy=False,
             )
 
             response = self._request(
@@ -308,7 +305,6 @@ class WebAppTests(unittest.TestCase):
                 app_runtime_settings=settings,
                 pipeline=fake_pipeline,
                 generation_manager=BackgroundGenerationManager(settings, fake_pipeline),
-                mount_legacy=False,
             )
 
             save_response = self._request(
@@ -363,7 +359,7 @@ class WebAppTests(unittest.TestCase):
                 xdg_cache_home=base / "cache",
                 deepseek_api_key="dummy",
             )
-            app = create_web_app(app_runtime_settings=settings, mount_legacy=False)
+            app = create_web_app(app_runtime_settings=settings)
 
             response = self._request(
                 app,

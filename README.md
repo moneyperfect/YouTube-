@@ -1,135 +1,144 @@
 # YTSubViewer
 
-本项目是一个 Windows 本地优先的 YouTube 长视频字幕本地化工具，当前支持：
+> YouTube 长视频字幕本地化工具 — 下载、转写、翻译、导出，一站完成。
 
-- 输入 YouTube 链接并分析视频信息
-- 支持批量链接入队、后台任务队列、刷新后自动恢复
-- 新壳任务历史、任务详情、失败重试、取消任务
-- 优先复用 YouTube 人工英文字幕；没有时回退到本地 `faster-whisper`
-- 生成简体中文字幕 `SRT`
-- 生成纯中文 `ASS` 和双语 `ASS`
-- 本地 `mpv` 播放器一键挂载字幕播放
-- 导出烧录好的 `中文字幕 MP4`、`双语 MP4`，以及快速预览版
-- 单句字幕编辑、单句重译、锁句、批量术语替换、质量报告
-- 频道/创作者级术语和风格记忆
-- 本地授权状态、更新状态与安装器脚手架
+**作者**: [NasBuild](https://nasbuild.dev) | **技术栈**: Python + FastAPI + 原生 JS
 
-## 当前启动方式
+## 功能特性
 
-开发环境可直接运行：
+- 🎬 **视频下载** — 输入 YouTube 链接，自动下载视频和字幕
+- 🌐 **智能字幕** — 优先复用 YouTube 人工英文字幕；没有时回退到自动字幕或本地 `faster-whisper`
+- 🔄 **多 LLM 翻译** — 支持 DeepSeek、OpenAI、通义千问、Moonshot、Ollama 等多种翻译引擎
+- 📝 **字幕编辑** — 单句编辑、重译、锁句、批量术语替换
+- 🎯 **质量控制** — 自动生成质量报告，检测残留英文和术语不一致
+- 🎬 **视频导出** — 烧录中文字幕或双语字幕到视频
+- 📊 **批量处理** — 支持多链接批量入队、后台任务队列
+- 💾 **配置持久化** — 翻译配置自动保存，下次打开直接使用
 
-```powershell
-.\start.ps1
-```
+## 快速开始
 
-或：
-
-```powershell
-.venv\Scripts\python.exe app.py
-```
-
-应用会自动：
-
-- 读取用户配置文件
-- 选择可用端口
-- 初始化数据目录与缓存目录
-- 自动打开浏览器访问本地页面
-
-## 首次使用
-
-首次打开页面后，先在“应用设置与环境”里完成这一步：
-
-1. 填写 `DeepSeek API key`
-2. 点击“保存设置”
-
-设置会保存到：
-
-- 配置文件：`%LOCALAPPDATA%\YTSubViewer\settings.json`
-
-数据默认保存到：
-
-- 优先：`D:\YTSubViewerData`
-- 回退：`%LOCALAPPDATA%\YTSubViewer`
-
-后续模型缓存、任务输出、日志都会写入应用数据目录，而不是项目目录。
-
-## 运行依赖
-
-当前项目依赖：
+### 环境要求
 
 - Python 3.11+
-- `ffmpeg`
-- `mpv`
-- NVIDIA GPU（推荐，但不是强制）
+- ffmpeg（用于视频处理）
+- mpv（用于本地播放，可选）
+- NVIDIA GPU（推荐，用于加速转写）
 
-如果使用源码模式，请先安装依赖：
+### 安装
 
-```powershell
+```bash
+# 克隆项目
+git clone <repo-url>
+cd YTSubViewer
+
+# 创建虚拟环境
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # macOS/Linux
+
+# 安装依赖
 pip install -r requirements.txt
 ```
 
-## 便携版打包
+### 启动
 
-项目已提供 PyInstaller 的 onedir 便携打包配置。
+```bash
+# 方式一：使用启动脚本
+.\start.ps1
 
-构建命令：
+# 方式二：直接运行
+python app.py
+```
+
+应用会自动打开浏览器访问 http://127.0.0.1:8000
+
+### 首次配置
+
+1. 打开浏览器访问应用
+2. 点击左侧导航栏「模型配置」
+3. 选择翻译引擎（如 DeepSeek Test）
+4. 填写 API Key
+5. 点击「保存设置」
+
+## 使用方法
+
+1. **粘贴链接** — 在「任务工作台」粘贴 YouTube 链接
+2. **分析视频** — 点击「分析视频」获取视频信息
+3. **生成字幕** — 点击「生成字幕」开始翻译
+4. **查看结果** — 翻译完成后可播放、导出或编辑
+
+## 项目结构
+
+```
+src/ytsubviewer/
+├── config/              # 配置模块
+│   ├── settings.py      # Settings 数据类
+│   └── crypto.py        # 加密工具
+├── routes/              # API 路由
+│   ├── serializers.py   # 序列化函数
+│   └── helpers.py       # 辅助函数
+├── services/            # 服务层
+│   ├── base.py          # 服务基类
+│   ├── youtube.py       # YouTube 服务
+│   ├── translate.py     # 翻译服务
+│   ├── transcribe.py    # 转写服务
+│   ├── export.py        # 导出服务
+│   └── player.py        # 播放器服务
+├── web/                 # 前端资源
+│   ├── index.html       # 主页面
+│   ├── app.js           # 前端逻辑
+│   └── styles.css       # 样式表
+├── webapp.py            # FastAPI 应用
+├── pipeline.py          # 翻译流程编排
+├── background_jobs.py   # 后台任务管理
+└── models.py            # 数据模型
+```
+
+## 开发
+
+### 运行测试
+
+```bash
+# 运行全部测试
+python -m unittest discover -s tests -v
+
+# 运行单个测试
+python -m unittest tests.test_config -v
+```
+
+### 构建便携版
 
 ```powershell
 .\build_portable.ps1
 ```
 
-构建完成后，可交付目录为：
+构建完成后，可执行文件位于 `dist\YTSubViewer\`
 
-```text
-dist\YTSubViewer
+### Docker 部署
+
+```bash
+docker compose up -d
 ```
 
-其中可直接双击：
+## 环境变量
 
-```text
-dist\YTSubViewer\YTSubViewer.exe
-```
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | - |
+| `WHISPER_MODEL` | 转写模型 | `distil-large-v3` |
+| `YTSUBVIEWER_DATA_ROOT` | 数据存储目录 | 项目根目录 |
+| `MAX_CONCURRENT_TASKS` | 最大并发任务数 | `3` |
 
-或：
+完整配置请参考 `.env.example`
 
-```text
-dist\YTSubViewer\启动应用.cmd
-```
+## 技术栈
 
-## 安装器打包
+- **后端**: Python, FastAPI, uvicorn
+- **前端**: 原生 HTML/CSS/JavaScript
+- **视频处理**: ffmpeg, yt-dlp
+- **语音转写**: faster-whisper
+- **翻译**: OpenAI 兼容 API
 
-项目已补充 Inno Setup 安装器脚手架。
+## 许可证
 
-构建命令：
-
-```powershell
-.\build_installer.ps1
-```
-
-前提：
-
-- 已安装 `Inno Setup 6`
-- 能找到 `ISCC.exe`
-
-安装器脚本位于：
-
-```text
-installer\YTSubViewer.iss
-```
-
-## 授权与更新
-
-- 本地授权状态文件：`%LOCALAPPDATA%\YTSubViewer\license_state.json`
-- 授权 token 生成脚本：`scripts\generate_license.py`
-- 更新源示例：`installer\update-feed.sample.json`
-
-如果设置了环境变量 `YTSUBVIEWER_LICENSE_SECRET`，应用会按本地签名规则校验授权码；未设置时，可用 `DEV-LICENSE` 走开发模式激活。
-
-## 测试
-
-```powershell
-python -m unittest discover -s tests
-python -m compileall app.py src tests
-```
+详见 LICENSE 文件

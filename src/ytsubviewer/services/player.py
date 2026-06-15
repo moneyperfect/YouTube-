@@ -4,12 +4,13 @@ import subprocess
 from pathlib import Path
 
 from ytsubviewer.config import Settings
+from ytsubviewer.services.base import BaseService
 from ytsubviewer.utils import program_exists
 
 
-class PlayerService:
+class PlayerService(BaseService):
     def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+        super().__init__(settings)
 
     def open_with_subtitle(self, video_path: Path, subtitle_path: Path) -> str:
         if not video_path.exists():

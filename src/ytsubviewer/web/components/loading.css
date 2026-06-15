@@ -1,0 +1,127 @@
+/* Loading animation styles */
+
+/* Button loading state */
+.button.loading {
+  position: relative;
+  color: transparent !important;
+  pointer-events: none;
+}
+
+.button.loading::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  top: 50%;
+  left: 50%;
+  margin-left: -9px;
+  margin-top: -9px;
+  border: 2px solid var(--accent-inverse);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+.button.secondary.loading::after {
+  border-color: var(--muted);
+  border-top-color: transparent;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Skeleton loading */
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-soft) 25%, var(--surface-hover) 50%, var(--surface-soft) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--radius-sm);
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Pulse animation for status */
+.pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Toast notification */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  padding: 12px 20px;
+  border-radius: var(--radius-md);
+  background: var(--text);
+  color: var(--accent-inverse);
+  font-size: 0.88rem;
+  font-weight: 500;
+  box-shadow: var(--shadow-float);
+  z-index: 1000;
+  opacity: 0;
+  transform: translateY(20px);
+  transition: all 200ms ease;
+  pointer-events: none;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast.success {
+  background: var(--success);
+}
+
+.toast.error {
+  background: var(--danger);
+}
+
+/* Inline loading indicator */
+.loading-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.loading-inline::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--surface-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+/* Progress bar animation */
+.progress-bar.animated {
+  transition: width 0.3s ease;
+}
+
+/* Card loading overlay */
+.card-loading {
+  position: relative;
+}
+
+.card-loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(250, 247, 242, 0.8);
+  border-radius: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

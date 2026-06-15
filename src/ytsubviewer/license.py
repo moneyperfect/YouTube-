@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sys
 import time
@@ -11,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from ytsubviewer.config import APP_VERSION, Settings
+
+logger = logging.getLogger(__name__)
+
+# 远程验证服务器地址（可通过环境变量覆盖）
+REMOTE_VERIFY_URL = os.getenv("YTSUBVIEWER_LICENSE_VERIFY_URL", "https://your-license-server.example.com/api/verify")
 
 
 class LicenseManager:
@@ -74,6 +80,57 @@ class LicenseManager:
         state.pop("last_validated_at", None)
         self._save_state(state)
         return self.status()
+
+    async def verify_remote(self, license_key: str) -> dict[str, Any]:
+        """向远程服务器验证激活码，通过后本地持久化。"""
+        import httpx
+
+        key = (license_key or "").strip()
+        if not key:
+            raise RuntimeError("激活码不能为空。")
+
+        verify_url = os.getenv("YTSUBVIEWER_LICENSE_VERIFY_URL", REMOTE_VERIFY_URL)
+        if not verify_url or "your-license-server" in verify_url:
+            # 未配置远程服务器时回退到本地验证
+            return self.activate(key)
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    verify_url,
+                    json={"license_key": key, "machine_id": self._machine_id()},
+                )
+                resp.raise_for_status()
+                result = resp.json()
+        except httpx.TimeoutException:
+            raise RuntimeError("验证服务器响应超时，请检查网络连接后重试。")
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"验证服务器返回错误（{exc.response.status_code}），请确认激活码正确。")
+        except Exception as exc:
+            raise RuntimeError(f"无法连接验证服务器：{exc}") from exc
+
+        if not result.get("valid"):
+            raise RuntimeError(result.get("message", "激活码无效，请检查后重试。"))
+
+        # 验证通过，本地持久化
+        state = self._load_state()
+        state["license_token"] = key
+        state["license_payload"] = {
+            "licensee": result.get("licensee", ""),
+            "plan": result.get("plan", ""),
+            "expires_at": result.get("expires_at"),
+            "issued_at": result.get("issued_at", time.time()),
+        }
+        state["last_validated_at"] = time.time()
+        state["verified_remotely"] = True
+        self._save_state(state)
+        return self.status()
+
+    @staticmethod
+    def _machine_id() -> str:
+        import platform
+        raw = f"{platform.node()}-{platform.machine()}-{platform.processor()}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _decode_token(self, token: str) -> dict[str, Any]:
         secret = os.getenv("YTSUBVIEWER_LICENSE_SECRET", "").strip()
