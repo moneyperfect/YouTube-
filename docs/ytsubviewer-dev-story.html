@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>用 AI 做了一个 YouTube 翻译工具 - NasBuild</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0a;
+      color: #e5e5e5;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif;
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 80px 24px;
+    }
+
+    /* ── Back link ── */
+    .back {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #888;
+      font-size: 0.88rem;
+      text-decoration: none;
+      margin-bottom: 60px;
+      transition: color 0.2s;
+    }
+    .back:hover { color: #fff; }
+
+    /* ── Hero ── */
+    .hero-label {
+      font-size: 0.75rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #D97757;
+      margin-bottom: 16px;
+    }
+
+    .hero h1 {
+      font-size: 2.8rem;
+      font-weight: 800;
+      line-height: 1.15;
+      color: #fff;
+      margin-bottom: 20px;
+      letter-spacing: -0.03em;
+    }
+
+    .hero p {
+      font-size: 1.1rem;
+      color: #999;
+      line-height: 1.8;
+      max-width: 560px;
+    }
+
+    /* ── Stats ── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 24px;
+      margin: 64px 0;
+      padding: 32px 0;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    .stat-num {
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: -0.02em;
+    }
+
+    .stat-label {
+      font-size: 0.78rem;
+      color: #666;
+      margin-top: 4px;
+    }
+
+    /* ── Section ── */
+    .section {
+      margin-top: 80px;
+    }
+
+    .section-label {
+      font-size: 0.72rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #D97757;
+      margin-bottom: 12px;
+    }
+
+    .section h2 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 24px;
+      letter-spacing: -0.02em;
+    }
+
+    .section h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: #fff;
+      margin: 32px 0 12px;
+    }
+
+    .section p {
+      color: #aaa;
+      font-size: 0.95rem;
+      line-height: 1.9;
+      margin-bottom: 16px;
+    }
+
+    /* ── Timeline ── */
+    .timeline {
+      margin: 40px 0;
+    }
+
+    .timeline-item {
+      display: flex;
+      gap: 20px;
+      padding: 20px 0;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    .timeline-date {
+      flex-shrink: 0;
+      width: 80px;
+      font-size: 0.82rem;
+      color: #666;
+      padding-top: 2px;
+    }
+
+    .timeline-content h4 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+
+    .timeline-content p {
+      font-size: 0.88rem;
+      color: #888;
+      margin: 0;
+    }
+
+    /* ── Callout ── */
+    .callout {
+      background: #111;
+      border-left: 3px solid #D97757;
+      padding: 24px 28px;
+      margin: 40px 0;
+      border-radius: 0 12px 12px 0;
+    }
+
+    .callout p {
+      color: #ccc;
+      font-size: 1.05rem;
+      font-style: italic;
+      line-height: 1.8;
+      margin: 0;
+    }
+
+    /* ── Tags ── */
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 24px 0;
+    }
+
+    .tag {
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: #1a1a1a;
+      color: #999;
+      font-size: 0.78rem;
+      font-weight: 500;
+    }
+
+    /* ── Screenshot ── */
+    .screenshot {
+      width: 100%;
+      border-radius: 16px;
+      margin: 32px 0;
+      border: 1px solid #1a1a1a;
+    }
+
+    /* ── CTA ── */
+    .cta {
+      margin-top: 80px;
+      padding-top: 40px;
+      border-top: 1px solid #1a1a1a;
+      text-align: center;
+    }
+
+    .cta a {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 32px;
+      background: #D97757;
+      color: #fff;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      transition: background 0.2s;
+    }
+
+    .cta a:hover { background: #c46a4d; }
+
+    .cta p {
+      color: #666;
+      font-size: 0.85rem;
+      margin-top: 16px;
+    }
+
+    /* ── Footer ── */
+    footer {
+      margin-top: 80px;
+      padding-top: 24px;
+      border-top: 1px solid #1a1a1a;
+      text-align: center;
+      font-size: 0.78rem;
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <a href="https://nasbuild.dev" class="back">← nasbuild.dev</a>
+
+    <!-- Hero -->
+    <div class="hero">
+      <p class="hero-label">开发复盘</p>
+      <h1>用 AI 做了一个<br>YouTube 翻译工具</h1>
+      <p>从需求到上线，全程 AI 辅助编程。72 小时内完成一个完整的视频字幕翻译产品，包含下载、转写、翻译、导出全链路。</p>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div>
+        <div class="stat-num">72h</div>
+        <div class="stat-label">从零到上线</div>
+      </div>
+      <div>
+        <div class="stat-num">8K+</div>
+        <div class="stat-label">代码行数</div>
+      </div>
+      <div>
+        <div class="stat-num">65</div>
+        <div class="stat-label">单元测试</div>
+      </div>
+      <div>
+        <div class="stat-num">5</div>
+        <div class="stat-label">LLM 后端</div>
+      </div>
+    </div>
+
+    <!-- Background -->
+    <div class="section">
+      <p class="section-label">背景</p>
+      <h2>为什么做这个工具</h2>
+      <p>我经常需要翻译 YouTube 上的长视频，但市面上的工具要么太贵，要么质量太差。DeepL 翻译字幕效果一般，专门的视频翻译 SaaS 又太贵。</p>
+      <p>于是我决定自己做一个。更重要的是，我想验证一件事：<strong>用 AI 辅助编程，一个人能走多远？</strong></p>
+    </div>
+
+    <!-- Timeline -->
+    <div class="section">
+      <p class="section-label">时间线</p>
+      <h2>72 小时发生了什么</h2>
+
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="timeline-date">Day 1</div>
+          <div class="timeline-content">
+            <h4>核心链路搭建</h4>
+            <p>yt-dlp 视频下载 → faster-whisper 转写 → DeepSeek API 翻译 → ffmpeg 字幕烧录。跑通最小可用版本。</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-date">Day 2</div>
+          <div class="timeline-content">
+            <h4>产品化重构</h4>
+            <p>前端从 Gradio 迁移到原生 HTML/JS，加入 FastAPI 后端。配置持久化、任务队列、批量处理。</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-date">Day 3</div>
+          <div class="timeline-content">
+            <h4>架构优化与发布</h4>
+            <p>代码模块化拆分（config/routes/services），iPhone 质感 UI 重写，添加加载动画和 Toast 提示。开源发布。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tech Stack -->
+    <div class="section">
+      <p class="section-label">技术栈</p>
+      <h2>用了什么技术</h2>
+      <div class="tags">
+        <span class="tag">Python</span>
+        <span class="tag">FastAPI</span>
+        <span class="tag">yt-dlp</span>
+        <span class="tag">faster-whisper</span>
+        <span class="tag">ffmpeg</span>
+        <span class="tag">OpenAI API</span>
+        <span class="tag">原生 JS</span>
+        <span class="tag">Docker</span>
+      </div>
+      <p>后端用 Python + FastAPI，前端用原生 HTML/CSS/JS（无框架）。翻译支持 5 种 LLM 后端：DeepSeek、OpenAI、通义千问、Moonshot、Ollama 本地。</p>
+    </div>
+
+    <!-- Key Insight -->
+    <div class="callout">
+      <p>"AI 时代，技术能力是基本功，产品思维才是分水岭。"</p>
+    </div>
+
+    <!-- What I Learned -->
+    <div class="section">
+      <p class="section-label">复盘</p>
+      <h2>学到了什么</h2>
+
+      <h3>1. AI 能做什么</h3>
+      <p>代码编写、调试、重构、测试生成、文档撰写——AI 全都能做。但它需要你给出清晰的指令和正确的方向。</p>
+
+      <h3>2. AI 不能做什么</h3>
+      <p>产品判断、用户体验、商业决策——这些仍然需要人来思考。AI 是执行者，不是决策者。</p>
+
+      <h3>3. 最大的收获</h3>
+      <p>不是代码本身，而是<strong>用 AI 构建产品的思维方式</strong>。如何拆解需求、如何描述问题、如何验证结果——这些能力比写代码更重要。</p>
+    </div>
+
+    <!-- Product -->
+    <div class="section">
+      <p class="section-label">产品</p>
+      <h2>最终成品</h2>
+      <p>一个完整的 YouTube 视频字幕翻译工具，支持：</p>
+      <p>• 输入链接自动下载视频和字幕<br>
+         • 多 LLM 后端翻译（DeepSeek、OpenAI 等）<br>
+         • 字幕编辑器（单句编辑、重译、锁句）<br>
+         • 视频导出（烧录中文字幕或双语字幕）<br>
+         • 批量处理、任务队列、配置持久化</p>
+    </div>
+
+    <!-- CTA -->
+    <div class="cta">
+      <a href="https://github.com/moneyperfect/YTSubViewer">查看 GitHub 仓库 →</a>
+      <p>MIT 开源，欢迎使用和贡献</p>
+    </div>
+
+    <footer>
+      © 2024 NasBuild · <a href="https://nasbuild.dev" style="color:#666;">nasbuild.dev</a>
+    </footer>
+
+  </div>
+</body>
+</html>
